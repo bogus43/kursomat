@@ -113,3 +113,19 @@ func TestGetRateOnOrBeforeNoData(t *testing.T) {
 		t.Fatalf("expected ErrNoData, got %v", err)
 	}
 }
+
+func TestWaitBackoffCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := waitBackoff(ctx, 2*time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatalf("waitBackoff should return quickly when context is cancelled")
+	}
+}

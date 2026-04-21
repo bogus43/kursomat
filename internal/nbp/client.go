@@ -139,7 +139,9 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst *rateRangeResp
 	for attempt := 0; attempt <= c.retryCount; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(attempt*attempt) * 200 * time.Millisecond
-			time.Sleep(backoff)
+			if err := waitBackoff(ctx, backoff); err != nil {
+				return mapNetworkError(err)
+			}
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -196,6 +198,18 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst *rateRangeResp
 		lastErr = errors.New("nieznany błąd podczas zapytania do API NBP")
 	}
 	return lastErr
+}
+
+func waitBackoff(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func shouldRetryNetworkError(err error) bool {
