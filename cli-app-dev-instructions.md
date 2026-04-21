@@ -452,6 +452,444 @@ if m.focusIndex == startButtonIndex && key == "enter" {
 - `Esc` odpowiada anulowaniu,
 - gdy trwa zadanie, przycisk powinien być zablokowany albo zamieniony w stan `busy`.
 
+### Wzorzec przycisku start w formularzu konfiguracji
+
+Jeżeli ekran konfiguracji ma działać jak w `DataDownloader`, `Analyzer` albo `HyperoptAssistant`, przycisk startu powinien być traktowany jako osobny fokusowalny element formularza, a nie tylko skrót w stopce.
+
+Minimalny wzorzec implementacyjny:
+
+1. Dodaj osobny typ pola submit, np. `configFieldSubmit` albo stały indeks typu `runtimeFieldSubmit`.
+2. Dodaj to pole na końcu listy pól formularza, tak aby `Tab` i `Shift+Tab` naturalnie mogły na nie wejść.
+3. Jeżeli model trzyma `inputs` równolegle do `fields`, dodaj także pusty wpis do `inputs`, żeby nie rozjechały się indeksy.
+4. W `renderBody()` obsłuż to pole specjalnie:
+   - nie renderuj zwykłego label + input,
+   - renderuj obramowany przycisk z wyraźnym stanem focus,
+   - zachowaj lekkie wcięcie, żeby przycisk był wyrównany z resztą formularza.
+5. W `Update()` zostaw `Enter` na ostatnim fokusie jako akcję startu; nie twórz dla tego osobnej ścieżki, jeśli formularz już zapisuje na ostatnim polu.
+6. W `footerHelpText()` pokaż jawny komunikat typu `Enter start ... | Ctrl+S start`.
+
+Przykładowy helper renderujący:
+
+```go
+func renderStartButton(label string, focused bool) string {
+    var btnStyle lipgloss.Style
+    if focused {
+        btnStyle = lipgloss.NewStyle().
+            Bold(true).
+            Padding(0, 3).
+            Border(lipgloss.RoundedBorder()).
+            BorderForeground(lipgloss.Color("40")).
+            Foreground(lipgloss.Color("40"))
+    } else {
+        btnStyle = lipgloss.NewStyle().
+            Padding(0, 3).
+            Border(lipgloss.RoundedBorder()).
+            BorderForeground(lipgloss.Color("238")).
+            Foreground(lipgloss.Color("238"))
+    }
+    button := btnStyle.Render("  ▶   " + strings.ToUpper(strings.TrimSpace(label)) + "  ")
+    const btnLeftOffset = 2
+    lines := strings.Split(button, "\n")
+    for index, line := range lines {
+        lines[index] = strings.Repeat(" ", btnLeftOffset) + line
+    }
+    return strings.Join(lines, "\n")
+}
+```
+
+Zasada UX:
+
+- fokus na przycisku musi być natychmiast widoczny,
+- przycisk powinien być częścią normalnej sekwencji `Tab`,
+- `Ctrl+S` może pozostać szybkim skrótem startu, ale nie zastępuje widocznego przycisku,
+- stopka musi zmieniać opis klawiszy po wejściu na pole submit.
+
+---
+
+## Wzorce repozytoryjne z 4 aplikacji
+
+Poniższe wzorce są już realnie używane w `Analyzer`, `HyperoptAssistant`, `DataDownloader` i `FreqAIAssistant`. Traktuj je jako wzorce referencyjne dla nowych narzędzi z tej rodziny.
+
+### 1. Jeden shell TUI na widok, nie doklejanie bloków
+
+Wszystkie pełnoekranowe widoki powinny renderować się przez jeden wspólny shell:
+
+- `header`
+- `body`
+- `footer`
+- opcjonalnie modal wyświetlany wewnątrz tego samego shellu
+
+Wzorzec:
+
+- `renderShellHeader(...)`
+- `renderAppShell(...)`
+- `renderShellFooter(...)`
+- `tea.View{AltScreen: true}`
+
+Nie buduj widoku przez dopisywanie kolejnych "sekcji ekranu" do stdout. Każdy ekran ma być odświeżany jako jedna spójna rama.
+
+### 2. Scrolluje się tylko body
+
+W tych czterech aplikacjach przewijalny jest wyłącznie obszar roboczy:
+
+- listy opcji,
+- logi procesu,
+- final review,
+- długie formularze help / review.
+
+Header, legenda, status i footer pozostają przypięte. Implementacyjnie oznacza to:
+
+- `viewport.Model` tylko dla body,
+- wysokość body liczona z `innerHeight - headerHeight - footerHeight`,
+- brak przewijania całego shellu.
+
+### 3. Formularz konfiguracji ma jawne typy pól
+
+Konfiguracja startowa nie jest zbiorem luźnych promptów. Model formularza powinien mieć:
+
+- listę pól,
+- `focusIndex`,
+- typ pola,
+- walidację,
+- hint,
+- opcjonalny modal picker,
+- opcjonalne pole submit.
+
+W praktyce pole ma jeden z typów:
+
+- zwykły tekst,
+- picker pojedynczego wyboru,
+- picker wielokrotnego wyboru,
+- read-only pill,
+- submit button.
+
+To pozwala utrzymać stabilny layout bez rozgałęziania logiki po całym `Update()`.
+
+### 4. Bounded picker zamiast wolnego tekstu
+
+Gdy zbiór opcji jest ograniczony, używaj pickera zamiast ręcznego wpisywania tekstu.
+
+Ten wzorzec jest już używany dla:
+
+- strategii,
+- modeli,
+- presetów,
+- configów freqtrade,
+- trybów wejścia,
+- przestrzeni hyperopt,
+- loss functions,
+- action planów,
+- cleanup candidate selection,
+- timeframes / candle types / bool options.
+
+Standard pickera:
+
+- sortowanie deterministyczne,
+- `/` lub `Ctrl+F` otwiera filtr,
+- `?` / `F1` otwiera help,
+- `A-Z` robi first-letter jump,
+- `Ctrl+A` / `Ctrl+X` działa w trybie multi-select,
+- `allowEmpty` jest jawne i nie wynika pośrednio z pustej listy.
+
+### 5. Modal picker blokuje tło
+
+Gdy picker lub dialog jest otwarty:
+
+- formularz tła nie dostaje inputu,
+- `Esc` zamyka modal,
+- `Enter` zatwierdza,
+- filtr działa tylko w modalu,
+- rozmiar modalu jest liczony względem aktywnego shellu, nie całego ekranu "na sztywno".
+
+Wzorzec implementacyjny:
+
+- `if m.modal != nil { return m.updateModal(msg) }`
+- osobny `pickerModalModel`
+- `View(innerWidth, bodyHeight)` dla modala
+
+### 6. Fallback z convenience UI do edycji ręcznej
+
+W tych narzędziach picker lub discovery jest wygodą operatora, a nie jedyną ścieżką działania.
+
+Stosowana reguła:
+
+- jeśli discovery strategii/modeli/configów się nie powiedzie,
+- UI degraduje się do ręcznej edycji pola,
+- sesja nie kończy się błędem tylko dlatego, że convenience layer była niedostępna.
+
+Przykład:
+
+- `Analyzer`: awaria discovery pickera strategii nie może zablokować ręcznej edycji `strategy_filter`.
+
+### 7. Readiness scan filtruje wejście przed wykonaniem
+
+Zanim użytkownik wybierze strategie do uruchomienia, aplikacja powinna wykonać scan/readiness pass i pokazać tylko elementy bezpieczne dla danego workflow.
+
+Ten wzorzec występuje jako:
+
+- `Analyzer`: strategia dostępna dla backtestu,
+- `HyperoptAssistant`: strategia gotowa dla wybranych spaces,
+- `DataDownloader`: strategie tylko do rozszerzenia planu timeframe,
+- `FreqAIAssistant`: tylko `READY` i `READY_WITH_WARNINGS`.
+
+Ważna reguła implementacyjna:
+
+- wynik readiness jest osobną strukturą danych,
+- picker pokazuje tylko dopuszczalne pozycje,
+- niedopuszczalne pozycje są raportowane, ale nie rozwalają sesji.
+
+### 8. Runner local-first, docker-second
+
+Wspólny wzorzec runnera:
+
+1. Spróbuj rozwiązać lokalny executable.
+2. Jeśli to się nie uda i komenda to bare `freqtrade`, przejdź do Docker Compose fallback.
+3. W Dockerze:
+   - znajdź plik compose,
+   - ustal service,
+   - jeśli `docker_service` istnieje, traktuj go jako jawny wybór,
+   - jeśli nie, próbuj heurystyk dopiero potem,
+   - upewnij się, że service działa,
+   - ustaw `TranslatePath`.
+
+`commandRunner` powinien przenosić razem:
+
+- `Mode`,
+- `Executable`,
+- `PrefixArgs`,
+- `WorkingDir`,
+- `DockerService`,
+- `HostUserDataRoot`,
+- `ContainerUserDataRoot`,
+- `TranslatePath`.
+
+### 9. Path translation musi być jawne i ograniczone do `user_data`
+
+W ścieżce Docker fallback hostowe ścieżki nie mogą być tłumaczone "na oko". Wzorzec używany w repo:
+
+- `TranslatePath(path string) (string, error)`
+- `filepath.Rel(hostUserDataRoot, path)`
+- błąd, jeśli ścieżka wychodzi poza mountowany root
+
+To jest szczególnie ważne dla:
+
+- przygotowanych configów,
+- exportów,
+- skryptów launch,
+- logów,
+- runtime artifact roots.
+
+### 10. Prepared runtime config zamiast modyfikacji configu bazowego
+
+`DataDownloader` i `FreqAIAssistant` stosują wzorzec "prepared config snapshot":
+
+- wczytaj config bazowy,
+- nadpisz tylko runtime overrides,
+- zapisz wynik do osobnego pliku,
+- uruchamiaj `freqtrade` na tym pliku,
+- nie nadpisuj configu bazowego jako efekt uboczny wykonania.
+
+Jeżeli prepared config jest częścią produktu, raportuj również:
+
+- gdzie został zapisany,
+- jakie override zostały nałożone,
+- hash bazowego i wynikowego configu, jeśli workflow tego wymaga.
+
+### 11. Runtime state przez tracker + snapshot
+
+Dashboard nie powinien czytać bezpośrednio rozproszonych pól z wielu goroutines. Wspólny wzorzec:
+
+- tracker przechowuje stan mutowalny pod mutexem,
+- dashboard woła `Snapshot()`,
+- renderer pracuje na niemutowalnej kopii,
+- eventy są append-only,
+- wynik kroku jest zapisywany raz przez `Finish(...)`.
+
+To upraszcza:
+
+- odświeżanie,
+- stop request,
+- aktywny proces,
+- log tail,
+- render końcowych wyników.
+
+### 12. Stop request jest osobnym stanem, nie tylko sygnałem procesu
+
+W tych programach zatrzymanie sesji nie jest utożsamione z `Kill`.
+
+Używany wzorzec:
+
+- `RequestStop(...)` zapisuje intencję operatora,
+- UI pokazuje `stop requested`,
+- feeder przestaje podawać nowe zadania,
+- aktywny proces jest zatrzymywany kontrolowanie,
+- final summary nadal się generuje.
+
+To rozdziela:
+
+- intencję stopu,
+- stan dashboardu,
+- faktyczne zakończenie procesu,
+- wynik końcowy (`OK`, `ABORT`, `ERROR`, `SKIP`).
+
+### 13. Output procesu trafia do trackera i raportu, nie bezpośrednio do stdout
+
+Wspólny wzorzec:
+
+- subprocess stdout/stderr są przechwytywane,
+- ostatnie linie trafiają do dashboardu,
+- pełny kontekst może trafić do pliku logu lub podsumowania,
+- aktywny TUI nie jest zanieczyszczany surowym `fmt.Println`.
+
+### 14. Atomic write jako domyślny zapis stanu trwałego
+
+Wszystkie trwałe artefakty użytkowe powinny być zapisywane przez:
+
+- `CreateTemp(...)`
+- zapis do pliku tymczasowego
+- `Close()`
+- `Rename()` / replace
+
+To dotyczy:
+
+- reportów TXT,
+- JSON history,
+- cache,
+- prepared configów,
+- preset stores,
+- audit outputs.
+
+Na Windows trzeba uwzględnić wariant `remove + rename`, jeśli bezpośredni `Rename()` na istniejący target nie działa.
+
+### 15. Corrupt persistence nie może blokować programu
+
+`Analyzer`, `HyperoptAssistant` i `FreqAIAssistant` pokazują wzorzec odporności:
+
+- jeśli cache/history jest uszkodzony, ostrzeż operatora,
+- spróbuj odtworzyć bezpieczny pusty stan,
+- opcjonalnie przenieś uszkodzony plik do `.corrupt.*`,
+- nie kończ sesji, jeśli produkt może działać dalej.
+
+### 16. Cache/history muszą być keyed by real execution identity
+
+Wspólny wzorzec nie może opierać się tylko na nazwie strategii. Klucz powinien uwzględniać realne parametry wykonania:
+
+- checksum pliku strategii,
+- config checksum / prepared config hash,
+- timerange,
+- pair set lub pair timeranges,
+- model / identifier / stage, jeśli workflow tego wymaga,
+- ważne runtime args.
+
+Wzorzec:
+
+- exact-match reuse tylko dla pełnego podpisu wykonania,
+- near-match differences jako osobny audit/report,
+- reused result oznaczony jawnie jako cache reuse.
+
+### 17. Report i live UI są osobnymi produktami
+
+To repo już konsekwentnie rozdziela:
+
+- live dashboard do monitoringu,
+- TXT report do trwałego podsumowania,
+- JSON cache/history do mechaniki produktu.
+
+Zmiana układu TUI nie może automatycznie zmieniać formatu raportu końcowego. Renderery powinny być oddzielone od modeli domenowych.
+
+### 18. Sortowanie końcowych wyników musi być deterministyczne
+
+Nie wolno polegać na kolejności zakończenia workerów ani kolejności map.
+
+Sortowanie powinno być jawne i stabilne dla:
+
+- końcowego rankingu,
+- list wyników w dashboardzie,
+- wpisów w raporcie,
+- par / rodzin identifierów / comparable runs / cleanup candidates.
+
+### 19. Runtime artifacts mają własny katalog produktu pod `user_data`
+
+Każda aplikacja, która tworzy runtime artifacts, powinna trzymać je pod własnym katalogiem produktu, zamiast rozrzucać pliki po root repo.
+
+Wzorzec już obecny:
+
+- `user_data/datadownloader`
+- `user_data/freqaiassistant`
+
+Jeżeli aplikacja zapisuje:
+
+- prepared config,
+- export archives,
+- launch scripts,
+- handoff guides,
+- session reports,
+- session history,
+
+to powinny one być grupowane pod jednym dedykowanym rootem.
+
+### 20. Cleanup i maintenance zaczynają się od audytu read-only
+
+`FreqAIAssistant` wprowadza dobry wzorzec dla operacji potencjalnie destrukcyjnych:
+
+1. najpierw audit i lista kandydatów,
+2. potem jawny picker potwierdzenia,
+3. potem cleanup tylko wewnątrz zadanego rootu,
+4. opcjonalnie spójne sprzątnięcie wpisu history,
+5. finalny wynik cleanupu w raporcie.
+
+Nie łącz detekcji kandydata i automatycznego usuwania w jeden krok.
+
+### 21. Audyty doradcze nie powinny blokować trybu audit-only
+
+W tych aplikacjach nie każda niepewność jest błędem blokującym. Dobrą praktyką jest rozdzielenie:
+
+- `blocking errors`,
+- `risky conditions`,
+- `advisory findings`.
+
+Przykłady auditów doradczych:
+
+- local data coverage,
+- identifier freshness,
+- artifact completeness,
+- runtime path warnings,
+- picker discovery limits.
+
+Tylko warunki rzeczywiście uniemożliwiające wykonanie powinny zatrzymywać workflow.
+
+### 22. Final review powinien być osobnym ekranem, nie tylko końcem logu
+
+`FreqAIAssistant` pokazuje dodatkowy wzorzec:
+
+- po wykonaniu sesji można otworzyć osobny ekran review,
+- ranking, gate, audit i recommendations są renderowane w jednym przewijalnym widoku,
+- ekran review używa tego samego shellu TUI co reszta aplikacji, ale ma własny content model.
+
+Jeśli produkt ma złożone wnioski końcowe, nie upychaj ich wyłącznie do stopki albo ostatnich eventów dashboardu.
+
+### 23. Launch / handoff artifacts dla procesów operacyjnych
+
+Jeżeli aplikacja przygotowuje uruchomienie czegoś poza swoim procesem:
+
+- wygeneruj skrypt launch,
+- wygeneruj ścieżkę logu,
+- wygeneruj instrukcję attach/follow,
+- pokaż to w dashboardzie i zapisz do pliku handoff.
+
+To jest lepszy wzorzec niż "wypisz komendę do skopiowania" i zostaw operatora bez dalszego kontekstu.
+
+### 24. Skanowanie repo ma mieć listę wykluczeń narzędziowych
+
+Wzorzec obecny we wszystkich czterech aplikacjach:
+
+- nie skanuj `.git`,
+- nie skanuj `.venv` / `venv`,
+- nie skanuj `__pycache__`,
+- nie skanuj katalogów innych narzędzi z tej samej rodziny, gdy scan ma dotyczyć strategii użytkownika.
+
+To powinno być centralnie udokumentowane i trzymane deterministycznie, żeby uniknąć szumu i fałszywych trafień.
+
 ---
 
 ## Obsługa pól wejściowych
