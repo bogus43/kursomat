@@ -25,10 +25,28 @@ type Info struct {
 	SizeBytes     int64
 }
 
+type CurrencyStat struct {
+	Code      string
+	Name      string
+	RateCount int
+	FirstDate string
+	LastDate  string
+}
+
+type CurrencyHistoryEntry struct {
+	EffectiveRateDate string
+	Mid               float64
+	TableNo           string
+}
+
 type Store interface {
 	GetByQuery(currency, requestedDate string) (models.RateResult, bool, error)
+	GetLatestRate(currency, requestedDate string) (models.RateResult, bool, error)
 	StoreResolvedRate(currency, requestedDate string, rate models.NBPRate) error
+	StoreHistoricalRates(currency string, rates []models.NBPRate) error
 	GetCurrencies() ([]models.Currency, bool, error)
+	ListCurrencyStats() ([]CurrencyStat, error)
+	ListCurrencyHistory(currency string, limit int) ([]CurrencyHistoryEntry, error)
 	StoreCurrencies(currencies []models.Currency) error
 	Save() error
 	Clear() error
@@ -89,6 +107,33 @@ WHERE qc.currency_code = ? AND qc.requested_date = ?`
 	return result, true, nil
 }
 
+func (s *sqliteStore) GetLatestRate(currency, requestedDate string) (models.RateResult, bool, error) {
+	const query = `
+SELECT currency_code, effective_rate_date, mid, COALESCE(table_no, '')
+FROM rates
+WHERE currency_code = ? AND effective_rate_date <= ?
+ORDER BY effective_rate_date DESC
+LIMIT 1`
+
+	var result models.RateResult
+	err := s.db.QueryRow(query, strings.ToUpper(currency), requestedDate).Scan(
+		&result.Currency,
+		&result.EffectiveRateDate,
+		&result.Mid,
+		&result.TableNo,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return models.RateResult{}, false, nil
+	}
+	if err != nil {
+		return models.RateResult{}, false, normalizeDBError(fmt.Errorf("nie udało się odczytać historycznego kursu z bazy cache: %w", err))
+	}
+
+	result.RequestedDate = requestedDate
+	result.Source = "cache"
+	return result, true, nil
+}
+
 func (s *sqliteStore) StoreResolvedRate(currency, requestedDate string, rate models.NBPRate) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -139,6 +184,47 @@ ON CONFLICT(currency_code, requested_date) DO UPDATE SET
 	return nil
 }
 
+func (s *sqliteStore) StoreHistoricalRates(currency string, rates []models.NBPRate) error {
+	if len(rates) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się rozpocząć zapisu zakresu kursów do bazy cache: %w", err))
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	timestamp := time.Now().Format(time.RFC3339)
+	currency = strings.ToUpper(currency)
+	for _, rate := range rates {
+		if _, err = tx.Exec(`
+INSERT INTO rates(currency_code, effective_rate_date, mid, table_no, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(currency_code, effective_rate_date) DO UPDATE SET
+  mid = excluded.mid,
+  table_no = excluded.table_no,
+  updated_at = excluded.updated_at`,
+			currency,
+			rate.EffectiveRateDate,
+			rate.Mid,
+			rate.TableNo,
+			timestamp,
+		); err != nil {
+			return normalizeDBError(fmt.Errorf("nie udało się zapisać kursu historycznego do bazy cache: %w", err))
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się zatwierdzić zapisu zakresu kursów do bazy cache: %w", err))
+	}
+	return nil
+}
+
 func (s *sqliteStore) GetCurrencies() ([]models.Currency, bool, error) {
 	rows, err := s.db.Query(`SELECT code, name FROM currencies ORDER BY code`)
 	if err != nil {
@@ -158,6 +244,79 @@ func (s *sqliteStore) GetCurrencies() ([]models.Currency, bool, error) {
 		return nil, false, normalizeDBError(fmt.Errorf("nie udało się zakończyć odczytu listy walut z bazy cache: %w", err))
 	}
 	return currencies, len(currencies) > 0, nil
+}
+
+func (s *sqliteStore) ListCurrencyStats() ([]CurrencyStat, error) {
+	const query = `
+WITH known_currencies AS (
+  SELECT code, name FROM currencies
+  UNION
+  SELECT DISTINCT currency_code AS code, currency_code AS name
+  FROM rates
+  WHERE currency_code NOT IN (SELECT code FROM currencies)
+)
+SELECT
+  kc.code,
+  kc.name,
+  COUNT(r.effective_rate_date) AS rate_count,
+  COALESCE(MIN(r.effective_rate_date), '') AS first_date,
+  COALESCE(MAX(r.effective_rate_date), '') AS last_date
+FROM known_currencies kc
+LEFT JOIN rates r ON r.currency_code = kc.code
+GROUP BY kc.code, kc.name
+ORDER BY kc.code`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, normalizeDBError(fmt.Errorf("nie udało się odczytać statystyk walut z bazy cache: %w", err))
+	}
+	defer rows.Close()
+
+	stats := make([]CurrencyStat, 0, 16)
+	for rows.Next() {
+		var stat CurrencyStat
+		if err := rows.Scan(&stat.Code, &stat.Name, &stat.RateCount, &stat.FirstDate, &stat.LastDate); err != nil {
+			return nil, normalizeDBError(fmt.Errorf("nie udało się odczytać rekordu statystyk waluty: %w", err))
+		}
+		stats = append(stats, stat)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, normalizeDBError(fmt.Errorf("nie udało się zakończyć odczytu statystyk walut z bazy cache: %w", err))
+	}
+	return stats, nil
+}
+
+func (s *sqliteStore) ListCurrencyHistory(currency string, limit int) ([]CurrencyHistoryEntry, error) {
+	query := `
+SELECT effective_rate_date, mid, COALESCE(table_no, '')
+FROM rates
+WHERE currency_code = ?
+ORDER BY effective_rate_date DESC`
+
+	args := []any{strings.ToUpper(currency)}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, normalizeDBError(fmt.Errorf("nie udało się odczytać historii waluty z bazy cache: %w", err))
+	}
+	defer rows.Close()
+
+	history := make([]CurrencyHistoryEntry, 0, 64)
+	for rows.Next() {
+		var entry CurrencyHistoryEntry
+		if err := rows.Scan(&entry.EffectiveRateDate, &entry.Mid, &entry.TableNo); err != nil {
+			return nil, normalizeDBError(fmt.Errorf("nie udało się odczytać rekordu historii waluty: %w", err))
+		}
+		history = append(history, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, normalizeDBError(fmt.Errorf("nie udało się zakończyć odczytu historii waluty z bazy cache: %w", err))
+	}
+	return history, nil
 }
 
 func (s *sqliteStore) StoreCurrencies(currencies []models.Currency) error {

@@ -6,13 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"charm.land/log/v2"
 
 	"kursomat/internal/models"
 )
@@ -23,6 +25,7 @@ type ClientConfig struct {
 	RetryCount      int
 	MaxLookbackDays int
 	Verbose         bool
+	IsTUI           bool
 	HTTPClient      *http.Client
 }
 
@@ -32,6 +35,7 @@ type Client struct {
 	retryCount      int
 	maxLookbackDays int
 	verbose         bool
+	isTUI           bool
 	logger          *log.Logger
 }
 
@@ -86,13 +90,34 @@ func NewClient(cfg ClientConfig) *Client {
 		maxLookback = 92
 	}
 
+	var logOut io.Writer = os.Stderr
+	if cfg.IsTUI {
+		logDir := "logs"
+		_ = os.MkdirAll(logDir, 0o755)
+		f, err := os.OpenFile(filepath.Join(logDir, "nbp-client.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err == nil {
+			logOut = f
+		} else {
+			logOut = io.Discard
+		}
+	}
+
+	logger := log.New(logOut)
+	logger.SetPrefix("nbp-client")
+	if cfg.Verbose {
+		logger.SetLevel(log.DebugLevel)
+	} else {
+		logger.SetLevel(log.InfoLevel)
+	}
+
 	return &Client{
 		baseURL:         strings.TrimRight(baseURL, "/"),
 		httpClient:      httpClient,
 		retryCount:      retryCount,
 		maxLookbackDays: maxLookback,
 		verbose:         cfg.Verbose,
-		logger:          log.New(os.Stderr, "kursownik-nbp ", log.LstdFlags),
+		isTUI:           cfg.IsTUI,
+		logger:          logger,
 	}
 }
 
@@ -115,6 +140,39 @@ func (c *Client) GetRateOnOrBefore(ctx context.Context, currency string, request
 		return models.NBPRate{}, err
 	}
 	return pickLatestRate(payload, strings.ToUpper(currency), requestedDate)
+}
+
+func (c *Client) GetRatesInRange(ctx context.Context, currency string, startDate, endDate time.Time) ([]models.NBPRate, error) {
+	if endDate.Before(startDate) {
+		return nil, fmt.Errorf("data końcowa nie może być wcześniejsza niż początkowa")
+	}
+
+	endpoint := fmt.Sprintf(
+		"%s/exchangerates/rates/A/%s/%s/%s/?format=json",
+		c.baseURL,
+		strings.ToUpper(currency),
+		startDate.Format("2006-01-02"),
+		endDate.Format("2006-01-02"),
+	)
+
+	var payload rateRangeResponse
+	if err := c.doJSON(ctx, endpoint, &payload); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrNoData
+		}
+		return nil, err
+	}
+
+	rates := make([]models.NBPRate, 0, len(payload.Rates))
+	for _, item := range payload.Rates {
+		rates = append(rates, models.NBPRate{
+			Currency:          strings.ToUpper(currency),
+			EffectiveRateDate: item.EffectiveDate,
+			Mid:               item.Mid,
+			TableNo:           item.No,
+		})
+	}
+	return rates, nil
 }
 
 func (c *Client) GetCurrencies(ctx context.Context) ([]models.Currency, error) {
@@ -188,9 +246,7 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst any) error {
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = mapNetworkError(err)
-			if c.verbose {
-				c.logger.Printf("próba %d/%d nieudana: %v", attempt+1, c.retryCount+1, err)
-			}
+			c.logger.Debug("zapytanie nieudane", "próba", attempt+1, "błąd", err)
 			if shouldRetryNetworkError(err) && attempt < c.retryCount {
 				continue
 			}
@@ -217,9 +273,7 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst any) error {
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("API NBP chwilowo niedostępne (HTTP %d)", resp.StatusCode)
-			if c.verbose {
-				c.logger.Printf("próba %d/%d: %v", attempt+1, c.retryCount+1, lastErr)
-			}
+			c.logger.Debug("API niedostępne", "próba", attempt+1, "status", resp.StatusCode)
 			if attempt < c.retryCount {
 				continue
 			}

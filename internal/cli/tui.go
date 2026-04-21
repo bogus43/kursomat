@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -33,12 +35,31 @@ type currenciesLoadedMsg struct {
 }
 
 type currencyClickedMsg struct {
-	index int
+	target string
+	index  int
+}
+
+type mouseActionMsg struct {
+	action string
 }
 
 type convertFinishedMsg struct {
-	result string
-	err    error
+	result       string
+	direction    conversionDirection
+	sourceAmount float64
+	targetAmount float64
+	err          error
+}
+
+type prefetchFinishedMsg struct {
+	summary nbp.PrefetchSummary
+	err     error
+}
+
+type prefetchChunkFinishedMsg struct {
+	chunk     prefetchChunk
+	rateCount int
+	err       error
 }
 
 type cacheInfoLoadedMsg struct {
@@ -46,16 +67,70 @@ type cacheInfoLoadedMsg struct {
 	err  error
 }
 
+type currencyStatsLoadedMsg struct {
+	stats []cache.CurrencyStat
+	err   error
+}
+
+type currencyHistoryLoadedMsg struct {
+	currency string
+	history  []cache.CurrencyHistoryEntry
+	err      error
+}
+
 type cacheClearedMsg struct {
 	err error
 }
 
 type currencyItem struct {
-	code string
-	name string
+	code     string
+	name     string
+	selected bool
 }
 
-func (c currencyItem) Title() string       { return strings.ToUpper(c.code) + "  " + c.name }
+type prefetchChunk struct {
+	currency string
+	start    time.Time
+	end      time.Time
+}
+
+type amountField int
+
+const (
+	amountFieldPLN amountField = iota
+	amountFieldForeign
+)
+
+type dbSortMode int
+
+const (
+	dbSortByCode dbSortMode = iota
+	dbSortByRateCount
+	dbSortByLastDate
+)
+
+type dbCurrencyItem struct {
+	stat cache.CurrencyStat
+}
+
+func (i dbCurrencyItem) Title() string {
+	return fmt.Sprintf("%s  %s", i.stat.Code, i.stat.Name)
+}
+
+func (i dbCurrencyItem) Description() string {
+	return fmt.Sprintf("kursów: %d | pierwszy: %s | ostatni: %s", i.stat.RateCount, orDash(i.stat.FirstDate), orDash(i.stat.LastDate))
+}
+
+func (i dbCurrencyItem) FilterValue() string {
+	return i.stat.Code + " " + i.stat.Name
+}
+
+func (c currencyItem) Title() string {
+	if c.selected {
+		return "[x] " + strings.ToUpper(c.code) + "  " + c.name
+	}
+	return "[ ] " + strings.ToUpper(c.code) + "  " + c.name
+}
 func (c currencyItem) Description() string { return c.name }
 func (c currencyItem) FilterValue() string { return c.code + " " + c.name }
 
@@ -66,6 +141,7 @@ type tuiKeyMap struct {
 	PrevFocus  key.Binding
 	Search     key.Binding
 	ToggleDir  key.Binding
+	ToggleAll  key.Binding
 	Refresh    key.Binding
 	ClearCache key.Binding
 	ToggleHelp key.Binding
@@ -74,12 +150,13 @@ type tuiKeyMap struct {
 
 func defaultTUIKeyMap() tuiKeyMap {
 	return tuiKeyMap{
-		PrevTab:    key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "poprzednia zakładka")),
-		NextTab:    key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "następna zakładka")),
+		PrevTab:    key.NewBinding(key.WithKeys("left", "ctrl+left"), key.WithHelp("←", "poprzednia zakładka")),
+		NextTab:    key.NewBinding(key.WithKeys("right", "ctrl+right"), key.WithHelp("→", "następna zakładka")),
 		NextFocus:  key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "następny fokus")),
 		PrevFocus:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "poprzedni fokus")),
 		Search:     key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "szukaj waluty")),
 		ToggleDir:  key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "odwróć kierunek")),
+		ToggleAll:  key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "wszystkie waluty")),
 		Refresh:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "odśwież cache")),
 		ClearCache: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "wyczyść cache")),
 		ToggleHelp: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "pomoc")),
@@ -104,9 +181,10 @@ type tuiModel struct {
 	service *nbp.Service
 	store   cache.Store
 
-	keys    tuiKeyMap
-	help    help.Model
-	spinner spinner.Model
+	keys     tuiKeyMap
+	help     help.Model
+	spinner  spinner.Model
+	progress progress.Model
 
 	width  int
 	height int
@@ -114,21 +192,41 @@ type tuiModel struct {
 	activeTab int
 	focus     int
 
-	currencyList list.Model
-	amountInput  textinput.Model
-	dateInput    textinput.Model
+	currencyList       list.Model
+	cacheCurrencyList  list.Model
+	dbCurrencyList     list.Model
+	plnAmountInput     textinput.Model
+	foreignAmountInput textinput.Model
+	dateInput          textinput.Model
+	cacheFromInput     textinput.Model
+	cacheToInput       textinput.Model
+	dbFilterInput      textinput.Model
 
 	resultsViewport viewport.Model
 	cacheViewport   viewport.Model
+	dbViewport      viewport.Model
 
-	direction       conversionDirection
-	loading         bool
-	cacheBusy       bool
-	lastError       string
-	status          string
-	showHelp        bool
-	currenciesReady bool
-	cacheInfo       cache.Info
+	direction               conversionDirection
+	lastEditedAmount        amountField
+	loading                 bool
+	cacheBusy               bool
+	allCacheCurrencies      bool
+	currencyPickerOpen      bool
+	prefetchChunks          []prefetchChunk
+	prefetchDone            int
+	prefetchSummary         nbp.PrefetchSummary
+	lastError               string
+	status                  string
+	showHelp                bool
+	currenciesReady         bool
+	cacheInfo               cache.Info
+	currencyStats           []cache.CurrencyStat
+	filteredCurrencyStats   []cache.CurrencyStat
+	selectedDBCurrency      string
+	selectedDBHistory       []cache.CurrencyHistoryEntry
+	dbSortMode              dbSortMode
+	currencies              []models.Currency
+	selectedCacheCurrencies map[string]bool
 }
 
 func newTUIModel(cfg models.AppConfig, service *nbp.Service, store cache.Store) tuiModel {
@@ -151,13 +249,55 @@ func newTUIModel(cfg models.AppConfig, service *nbp.Service, store cache.Store) 
 		Foreground(lipgloss.Color("230")).
 		Background(lipgloss.Color("24"))
 
-	amountInput := textinput.New()
-	amountInput.Prompt = ""
-	amountInput.Placeholder = "np. 1500.00"
-	amountInput.CharLimit = 20
-	amountInput.SetValue("100.00")
-	amountInput.SetWidth(24)
-	amountInput.SetVirtualCursor(true)
+	cacheDelegate := list.NewDefaultDelegate()
+	cacheDelegate.ShowDescription = false
+	cacheDelegate.SetSpacing(0)
+	cacheCurrencyList := list.New([]list.Item{}, cacheDelegate, 32, 12)
+	cacheCurrencyList.Title = "PICKER WALUT"
+	cacheCurrencyList.SetShowHelp(false)
+	cacheCurrencyList.SetShowPagination(true)
+	cacheCurrencyList.SetShowStatusBar(true)
+	cacheCurrencyList.SetFilteringEnabled(true)
+	cacheCurrencyList.SetShowFilter(true)
+	cacheCurrencyList.DisableQuitKeybindings()
+	cacheCurrencyList.FilterInput.Placeholder = "Filtruj waluty do pobrania"
+	cacheCurrencyList.FilterInput.Prompt = "Filtr: "
+	cacheCurrencyList.Styles.Title = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
+		Foreground(lipgloss.Color("230")).
+		Background(lipgloss.Color("52"))
+
+	dbDelegate := list.NewDefaultDelegate()
+	dbDelegate.ShowDescription = true
+	dbDelegate.SetSpacing(0)
+	dbCurrencyList := list.New([]list.Item{}, dbDelegate, 32, 12)
+	dbCurrencyList.Title = "WALUTY W BAZIE"
+	dbCurrencyList.SetShowHelp(false)
+	dbCurrencyList.SetShowPagination(true)
+	dbCurrencyList.SetShowStatusBar(true)
+	dbCurrencyList.SetFilteringEnabled(false)
+	dbCurrencyList.DisableQuitKeybindings()
+	dbCurrencyList.Styles.Title = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
+		Foreground(lipgloss.Color("230")).
+		Background(lipgloss.Color("20"))
+
+	plnAmountInput := textinput.New()
+	plnAmountInput.Prompt = ""
+	plnAmountInput.Placeholder = "np. 1500.00"
+	plnAmountInput.CharLimit = 20
+	plnAmountInput.SetValue("100.00")
+	plnAmountInput.SetWidth(24)
+	plnAmountInput.SetVirtualCursor(true)
+
+	foreignAmountInput := textinput.New()
+	foreignAmountInput.Prompt = ""
+	foreignAmountInput.Placeholder = "np. 250.00"
+	foreignAmountInput.CharLimit = 20
+	foreignAmountInput.SetWidth(24)
+	foreignAmountInput.SetVirtualCursor(true)
 
 	dateInput := textinput.New()
 	dateInput.Prompt = ""
@@ -166,11 +306,34 @@ func newTUIModel(cfg models.AppConfig, service *nbp.Service, store cache.Store) 
 	dateInput.SetWidth(24)
 	dateInput.SetVirtualCursor(true)
 
+	cacheFromInput := textinput.New()
+	cacheFromInput.Prompt = ""
+	cacheFromInput.Placeholder = "YYYY-MM-DD"
+	cacheFromInput.SetValue(time.Now().AddDate(0, -1, 0).Format("2006-01-02"))
+	cacheFromInput.SetWidth(24)
+	cacheFromInput.SetVirtualCursor(true)
+
+	cacheToInput := textinput.New()
+	cacheToInput.Prompt = ""
+	cacheToInput.Placeholder = "YYYY-MM-DD"
+	cacheToInput.SetValue(time.Now().Format("2006-01-02"))
+	cacheToInput.SetWidth(24)
+	cacheToInput.SetVirtualCursor(true)
+
+	dbFilterInput := textinput.New()
+	dbFilterInput.Prompt = ""
+	dbFilterInput.Placeholder = "filtr po kodzie lub nazwie"
+	dbFilterInput.SetWidth(28)
+	dbFilterInput.SetVirtualCursor(true)
+
 	resultsViewport := viewport.New(viewport.WithWidth(60), viewport.WithHeight(14))
 	resultsViewport.SetContent("WYBIERZ WALUTĘ Z PICKERA, WPISZ KWOTĘ I DATĘ, A NASTĘPNIE NACIŚNIJ [ PRZELICZ ].")
 
 	cacheViewport := viewport.New(viewport.WithWidth(60), viewport.WithHeight(14))
 	cacheViewport.SetContent("ŁADOWANIE INFORMACJI O BAZIE CACHE...")
+
+	dbViewport := viewport.New(viewport.WithWidth(60), viewport.WithHeight(14))
+	dbViewport.SetContent("ŁADOWANIE LISTY WALUT Z BAZY...")
 
 	helpModel := help.New()
 	helpModel.ShowAll = false
@@ -178,128 +341,366 @@ func newTUIModel(cfg models.AppConfig, service *nbp.Service, store cache.Store) 
 	spin := spinner.New(spinner.WithSpinner(spinner.Line))
 	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
 
+	prog := progress.New(progress.WithWidth(34))
+
 	return tuiModel{
-		cfg:             cfg,
-		service:         service,
-		store:           store,
-		keys:            defaultTUIKeyMap(),
-		help:            helpModel,
-		spinner:         spin,
-		currencyList:    currencyList,
-		amountInput:     amountInput,
-		dateInput:       dateInput,
-		resultsViewport: resultsViewport,
-		cacheViewport:   cacheViewport,
-		status:          "Gotowy",
+		cfg:                     cfg,
+		service:                 service,
+		store:                   store,
+		keys:                    defaultTUIKeyMap(),
+		help:                    helpModel,
+		spinner:                 spin,
+		progress:                prog,
+		currencyList:            currencyList,
+		cacheCurrencyList:       cacheCurrencyList,
+		dbCurrencyList:          dbCurrencyList,
+		plnAmountInput:          plnAmountInput,
+		foreignAmountInput:      foreignAmountInput,
+		dateInput:               dateInput,
+		cacheFromInput:          cacheFromInput,
+		cacheToInput:            cacheToInput,
+		dbFilterInput:           dbFilterInput,
+		resultsViewport:         resultsViewport,
+		cacheViewport:           cacheViewport,
+		dbViewport:              dbViewport,
+		status:                  "Gotowy",
+		lastEditedAmount:        amountFieldPLN,
+		dbSortMode:              dbSortByCode,
+		selectedCacheCurrencies: map[string]bool{},
 	}
 }
 
 func (m tuiModel) Init() tea.Cmd {
 	return tea.Batch(
-		m.amountInput.Focus(),
+		m.plnAmountInput.Focus(),
 		textinput.Blink,
 		loadCurrenciesCmd(m.service, m.cfg.TimeoutSeconds),
 		loadCacheInfoCmd(m.store),
+		loadCurrencyStatsCmd(m.store),
 	)
 }
 
-func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var backgroundCmds []tea.Cmd
+
 	if m.loading || m.cacheBusy {
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		if spinCmd != nil {
-			defer func(existing tea.Cmd) {
-				if existing != nil {
-					spinCmd = tea.Batch(existing, spinnerTickCmd(m.spinner))
-				} else {
-					spinCmd = spinnerTickCmd(m.spinner)
-				}
-			}(spinCmd)
+			backgroundCmds = append(backgroundCmds, spinCmd)
+		}
+	}
+	if m.cacheBusy {
+		var progressCmd tea.Cmd
+		m.progress, progressCmd = m.progress.Update(msg)
+		if progressCmd != nil {
+			backgroundCmds = append(backgroundCmds, progressCmd)
 		}
 	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.resize()
-		return m, nil
-
+		return m.handleWindowSize(msg, backgroundCmds)
 	case currencyClickedMsg:
-		m.focus = 0
-		m.currencyList.Select(msg.index)
-		return m, nil
-
+		return m.handleCurrencyClicked(msg, backgroundCmds)
+	case mouseActionMsg:
+		return m.handleMouseAction(msg, backgroundCmds)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
-
 	case currenciesLoadedMsg:
-		m.loading = false
-		if msg.err != nil {
-			m.lastError = humanizeError(msg.err)
-			m.status = "Nie udało się załadować listy walut"
-			return m, nil
-		}
-		m.lastError = ""
-		m.currenciesReady = true
-		items := make([]list.Item, 0, len(msg.currencies))
-		selectedIndex := 0
-		for i, currency := range msg.currencies {
-			items = append(items, currencyItem{code: currency.Code, name: currency.Name})
-			if strings.EqualFold(currency.Code, "USD") {
-				selectedIndex = i
-			}
-		}
-		cmd := m.currencyList.SetItems(items)
-		m.currencyList.Select(selectedIndex)
-		m.status = fmt.Sprintf("Załadowano %d walut NBP", len(msg.currencies))
-		return m, tea.Batch(cmd)
-
+		return m.handleCurrenciesLoaded(msg, backgroundCmds)
 	case convertFinishedMsg:
-		m.loading = false
-		if msg.err != nil {
-			m.lastError = humanizeError(msg.err)
-			m.status = "Błąd przeliczenia"
-			return m, nil
-		}
-		m.lastError = ""
-		m.status = "Przeliczenie zakończone"
-		m.resultsViewport.SetContent(msg.result)
-		m.resultsViewport.GotoTop()
-		return m, loadCacheInfoCmd(m.store)
-
+		return m.handleConvertFinished(msg, backgroundCmds)
 	case cacheInfoLoadedMsg:
-		m.cacheBusy = false
-		if msg.err != nil {
-			m.lastError = humanizeError(msg.err)
-			m.status = "Błąd odczytu bazy cache"
-			return m, nil
-		}
-		m.lastError = ""
-		m.cacheInfo = msg.info
-		m.cacheViewport.SetContent(renderCacheInfo(msg.info))
-		if m.activeTab == 1 {
-			m.status = "Odczytano statystyki bazy cache"
-		}
-		return m, nil
-
+		return m.handleCacheInfoLoaded(msg, backgroundCmds)
+	case currencyStatsLoadedMsg:
+		return m.handleCurrencyStatsLoaded(msg, backgroundCmds)
+	case currencyHistoryLoadedMsg:
+		return m.handleCurrencyHistoryLoaded(msg, backgroundCmds)
 	case cacheClearedMsg:
-		m.cacheBusy = false
-		if msg.err != nil {
-			m.lastError = humanizeError(msg.err)
-			m.status = "Błąd czyszczenia bazy cache"
-			return m, nil
-		}
-		m.lastError = ""
-		m.status = "Baza cache wyczyszczona"
-		m.resultsViewport.SetContent("CACHE ZOSTAŁ WYCZYSZCZONY. NOWE KURSY BĘDĄ DOPISYWANE PRZY KOLEJNYCH ZAPYTANIACH.")
-		return m, tea.Batch(loadCacheInfoCmd(m.store), loadCurrenciesCmd(m.service, m.cfg.TimeoutSeconds))
+		return m.handleCacheCleared(msg, backgroundCmds)
+	case prefetchFinishedMsg:
+		return m.handlePrefetchFinished(msg, backgroundCmds)
+	case prefetchChunkFinishedMsg:
+		return m.handlePrefetchChunkFinished(msg, backgroundCmds)
 	}
 
 	if m.activeTab == 0 {
-		return m.updateConverterComponents(msg)
+		model, cmd := m.updateConverterComponents(msg)
+		return model, batchCmds(append(backgroundCmds, cmd)...)
 	}
-	return m.updateCacheComponents(msg)
+	if m.activeTab == 2 {
+		model, cmd := m.updateDatabaseComponents(msg)
+		return model, batchCmds(append(backgroundCmds, cmd)...)
+	}
+	model, cmd := m.updateCacheComponents(msg)
+	return model, batchCmds(append(backgroundCmds, cmd)...)
+}
+
+func (m *tuiModel) handleWindowSize(msg tea.WindowSizeMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	m.width = msg.Width
+	m.height = msg.Height
+	m.resize()
+	m.refreshCacheViewport()
+	m.refreshDBViewport()
+	return m, batchCmds(backgroundCmds...)
+}
+
+func (m *tuiModel) handleCurrencyClicked(msg currencyClickedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	if msg.target == "converter" {
+		m.focus = 0
+		m.currencyList.Select(msg.index)
+		return m, batchCmds(backgroundCmds...)
+	}
+	if msg.target == "cache" {
+		m.activeTab = 1
+		m.focus = 0
+		m.cacheCurrencyList.Select(msg.index)
+		m.toggleCurrentCacheCurrency()
+	}
+	if msg.target == "db" {
+		m.activeTab = 2
+		m.focus = 2
+		m.dbCurrencyList.Select(msg.index)
+		return m.loadSelectedDBCurrencyHistory()
+	}
+	return m, batchCmds(backgroundCmds...)
+}
+
+func (m *tuiModel) handleMouseAction(msg mouseActionMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	switch msg.action {
+	case "convert":
+		if !m.loading {
+			return m.startConversion()
+		}
+		return m, batchCmds(backgroundCmds...)
+	case "toggle-all-cache":
+		m.activeTab = 1
+		m.focus = 2
+		m.allCacheCurrencies = !m.allCacheCurrencies
+		m.status = m.cacheSelectionStatus()
+		return m, batchCmds(backgroundCmds...)
+	case "prefetch-cache":
+		m.activeTab = 1
+		m.focus = 4
+		if !m.cacheBusy {
+			return m.startRangePrefetch()
+		}
+		return m, batchCmds(backgroundCmds...)
+	case "open-currency-picker":
+		m.activeTab = 1
+		m.focus = 3
+		m.currencyPickerOpen = true
+		return m, batchCmds(backgroundCmds...)
+	case "close-currency-picker":
+		m.currencyPickerOpen = false
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "focus-amount":
+		m.activeTab = 0
+		m.focus = 1
+		m.lastEditedAmount = amountFieldPLN
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "focus-foreign-amount":
+		m.activeTab = 0
+		m.focus = 2
+		m.lastEditedAmount = amountFieldForeign
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "focus-date":
+		m.activeTab = 0
+		m.focus = 3
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "focus-cache-from":
+		m.activeTab = 1
+		m.focus = 0
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "focus-cache-to":
+		m.activeTab = 1
+		m.focus = 1
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "focus-db-filter":
+		m.activeTab = 2
+		m.focus = 0
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "toggle-db-sort":
+		m.activeTab = 2
+		m.focus = 1
+		m.dbSortMode = m.dbSortMode.next()
+		m.rebuildDBCurrencyList()
+		return m, batchCmds(backgroundCmds...)
+	case "tab-converter":
+		m.activeTab = 0
+		m.focus = 0
+		return m, batchCmds(append(backgroundCmds, m.focusCurrentField())...)
+	case "tab-cache":
+		m.activeTab = 1
+		m.focus = 0
+		return m, batchCmds(append(backgroundCmds, loadCacheInfoCmd(m.store))...)
+	case "tab-db":
+		m.activeTab = 2
+		m.focus = 0
+		return m, batchCmds(append(backgroundCmds, loadCurrencyStatsCmd(m.store))...)
+	}
+	return m, batchCmds(backgroundCmds...)
+}
+
+func (m *tuiModel) handleCurrenciesLoaded(msg currenciesLoadedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	m.loading = false
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		m.status = "Nie udało się załadować listy walut"
+		return m, batchCmds(backgroundCmds...)
+	}
+	m.lastError = ""
+	m.currenciesReady = true
+	m.currencies = append([]models.Currency(nil), msg.currencies...)
+	items := make([]list.Item, 0, len(msg.currencies))
+	selectedIndex := 0
+	for i, currency := range msg.currencies {
+		items = append(items, currencyItem{code: currency.Code, name: currency.Name})
+		if strings.EqualFold(currency.Code, "USD") {
+			selectedIndex = i
+		}
+	}
+	cmd := m.currencyList.SetItems(items)
+	m.currencyList.Select(selectedIndex)
+	cacheCmd := m.syncCacheCurrencyList()
+	m.status = fmt.Sprintf("Załadowano %d walut NBP", len(msg.currencies))
+	return m, batchCmds(append(backgroundCmds, cmd, cacheCmd)...)
+}
+
+func (m *tuiModel) handleConvertFinished(msg convertFinishedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	m.loading = false
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		m.status = "Błąd przeliczenia"
+		return m, batchCmds(backgroundCmds...)
+	}
+	m.lastError = ""
+	m.direction = msg.direction
+	if msg.direction == directionPLNToForeign {
+		m.plnAmountInput.SetValue(formatAmount(msg.sourceAmount))
+		m.foreignAmountInput.SetValue(formatAmount(msg.targetAmount))
+	} else {
+		m.foreignAmountInput.SetValue(formatAmount(msg.sourceAmount))
+		m.plnAmountInput.SetValue(formatAmount(msg.targetAmount))
+	}
+	m.status = "Przeliczenie zakończone"
+	m.resultsViewport.SetContent(msg.result)
+	m.resultsViewport.GotoTop()
+	return m, batchCmds(append(backgroundCmds, loadCacheInfoCmd(m.store))...)
+}
+
+func (m *tuiModel) handleCacheInfoLoaded(msg cacheInfoLoadedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	m.cacheBusy = false
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		m.status = "Błąd odczytu bazy cache"
+		return m, batchCmds(backgroundCmds...)
+	}
+	m.lastError = ""
+	m.cacheInfo = msg.info
+	m.refreshCacheViewport()
+	if m.activeTab == 1 {
+		m.status = "Odczytano statystyki bazy walut"
+	}
+	return m, batchCmds(backgroundCmds...)
+}
+
+func (m *tuiModel) handleCurrencyStatsLoaded(msg currencyStatsLoadedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		if m.activeTab == 2 {
+			m.status = "Błąd odczytu walut z bazy"
+		}
+		return m, batchCmds(backgroundCmds...)
+	}
+	m.lastError = ""
+	m.currencyStats = append([]cache.CurrencyStat(nil), msg.stats...)
+	m.rebuildDBCurrencyList()
+	if _, ok := m.selectedDBStat(); ok && len(m.selectedDBHistory) == 0 {
+		model, cmd := m.loadSelectedDBCurrencyHistory()
+		return model, batchCmds(append(backgroundCmds, cmd)...)
+	}
+	if m.activeTab == 2 {
+		m.status = fmt.Sprintf("Odczytano %d walut z bazy", len(msg.stats))
+	}
+	return m, batchCmds(backgroundCmds...)
+}
+
+func (m *tuiModel) handleCurrencyHistoryLoaded(msg currencyHistoryLoadedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		m.status = "Błąd odczytu historii waluty"
+		return m, batchCmds(backgroundCmds...)
+	}
+	m.lastError = ""
+	m.selectedDBCurrency = msg.currency
+	m.selectedDBHistory = append([]cache.CurrencyHistoryEntry(nil), msg.history...)
+	m.refreshDBViewport()
+	m.status = fmt.Sprintf("Odczytano historię waluty %s", msg.currency)
+	return m, batchCmds(backgroundCmds...)
+}
+
+func (m *tuiModel) handleCacheCleared(msg cacheClearedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	m.cacheBusy = false
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		m.status = "Błąd czyszczenia bazy cache"
+		return m, batchCmds(backgroundCmds...)
+	}
+	m.lastError = ""
+	m.status = "Baza cache wyczyszczona"
+	m.resultsViewport.SetContent("CACHE ZOSTAŁ WYCZYSZCZONY. NOWE KURSY BĘDĄ DOPISYWANE PRZY KOLEJNYCH ZAPYTANIACH.")
+	return m, batchCmds(append(backgroundCmds, loadCacheInfoCmd(m.store), loadCurrencyStatsCmd(m.store), loadCurrenciesCmd(m.service, m.cfg.TimeoutSeconds))...)
+}
+
+func (m *tuiModel) handlePrefetchFinished(msg prefetchFinishedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	m.cacheBusy = false
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		m.status = "Błąd pobierania zakresu do bazy walut"
+		return m, batchCmds(backgroundCmds...)
+	}
+	m.lastError = ""
+	m.prefetchChunks = nil
+	m.prefetchSummary = msg.summary
+	m.status = fmt.Sprintf("Baza walut uzupełniona: %d kursów dla %d walut", msg.summary.RateCount, msg.summary.CurrencyCount)
+	m.refreshCacheViewport()
+	return m, batchCmds(append(backgroundCmds, loadCacheInfoCmd(m.store), loadCurrencyStatsCmd(m.store))...)
+}
+
+func (m *tuiModel) handlePrefetchChunkFinished(msg prefetchChunkFinishedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.cacheBusy = false
+		m.prefetchChunks = nil
+		m.lastError = humanizeError(msg.err)
+		m.status = "Błąd pobierania zakresu do bazy walut"
+		return m, batchCmds(backgroundCmds...)
+	}
+
+	m.prefetchDone++
+	m.prefetchSummary.RateCount += msg.rateCount
+
+	cmds := append([]tea.Cmd{}, backgroundCmds...)
+	total := len(m.prefetchChunks) + m.prefetchDone
+	if total > 0 {
+		cmds = append(cmds, m.progress.SetPercent(float64(m.prefetchDone)/float64(total)))
+	}
+
+	if len(m.prefetchChunks) == 0 {
+		m.cacheBusy = false
+		m.status = fmt.Sprintf("Baza walut uzupełniona: %d kursów dla %d walut", m.prefetchSummary.RateCount, m.prefetchSummary.CurrencyCount)
+		cmds = append(cmds, tea.Cmd(func() tea.Msg {
+			return prefetchFinishedMsg{summary: m.prefetchSummary}
+		}))
+		return m, tea.Batch(cmds...)
+	}
+
+	next := m.prefetchChunks[0]
+	m.prefetchChunks = m.prefetchChunks[1:]
+	m.status = fmt.Sprintf("Import do cache: %s %s -> %s", next.currency, next.start.Format("2006-01-02"), next.end.Format("2006-01-02"))
+	cmds = append(cmds, prefetchChunkCmd(m.service, m.cfg.TimeoutSeconds, next), spinnerTickCmd(m.spinner))
+	return m, tea.Batch(cmds...)
 }
 
 func (m tuiModel) View() tea.View {
@@ -308,12 +709,12 @@ func (m tuiModel) View() tea.View {
 	status := m.renderStatus()
 	footer := m.renderFooter()
 
-	root := lipgloss.NewStyle().
-		Padding(1, 2).
-		Width(maxInt(m.width, 80)).
-		Height(maxInt(m.height, 24))
+	shell := shellStyle(m.width).Render(
+		lipgloss.JoinVertical(lipgloss.Left, header, body, status, footer),
+	)
+	root := lipgloss.NewStyle().Padding(1, 2)
 
-	v := tea.NewView(root.Render(lipgloss.JoinVertical(lipgloss.Left, header, body, status, footer)))
+	v := tea.NewView(root.Render(shell))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.OnMouse = m.onMouse()
@@ -321,21 +722,29 @@ func (m tuiModel) View() tea.View {
 }
 
 func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.currencyPickerOpen {
+		return m.handleCurrencyPickerKey(msg)
+	}
 	if m.activeTab == 0 && m.focus == 0 && m.currencyList.SettingFilter() {
 		return m.handleConverterKey(msg)
+	}
+	if m.activeTab == 1 && m.cacheCurrencyList.SettingFilter() {
+		return m.handleCacheKey(msg)
 	}
 
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
-	case key.Matches(msg, m.keys.PrevTab) && !m.converterInputFocused():
-		m.activeTab = 0
-		m.focus = 0
-		return m, m.focusCurrentField()
-	case key.Matches(msg, m.keys.NextTab) && !m.converterInputFocused():
-		m.activeTab = 1
-		m.focus = 0
-		return m, loadCacheInfoCmd(m.store)
+	case msg.String() == "esc":
+		if m.textInputFocused() {
+			m.focus = 0
+			return m, m.focusCurrentField()
+		}
+		return m, nil
+	case m.canSwitchToPrevTab(msg):
+		return m.switchTab(-1)
+	case m.canSwitchToNextTab(msg):
+		return m.switchTab(1)
 	case key.Matches(msg, m.keys.ToggleHelp):
 		m.showHelp = !m.showHelp
 		m.help.ShowAll = m.showHelp
@@ -345,7 +754,54 @@ func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.activeTab == 0 {
 		return m.handleConverterKey(msg)
 	}
-	return m.handleCacheKey(msg)
+	if m.activeTab == 1 {
+		return m.handleCacheKey(msg)
+	}
+	return m.handleDBKey(msg)
+}
+
+func (m *tuiModel) switchTab(delta int) (tea.Model, tea.Cmd) {
+	m.activeTab = (m.activeTab + delta + 3) % 3
+	m.focus = 0
+
+	switch m.activeTab {
+	case 0:
+		return m, m.focusCurrentField()
+	case 1:
+		return m, batchCmds(m.focusCurrentField(), loadCacheInfoCmd(m.store))
+	default:
+		return m, loadCurrencyStatsCmd(m.store)
+	}
+}
+
+func (m *tuiModel) handleDBKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab":
+		m.focus = (m.focus + 1) % 4
+		return m, m.focusCurrentField()
+	case "shift+tab":
+		m.focus = (m.focus + 3) % 4
+		return m, m.focusCurrentField()
+	case "enter":
+		if m.focus == 1 {
+			m.dbSortMode = m.dbSortMode.next()
+			m.rebuildDBCurrencyList()
+			return m, nil
+		}
+		if m.focus == 2 {
+			return m.loadSelectedDBCurrencyHistory()
+		}
+	case "/":
+		m.focus = 0
+		return m, m.focusCurrentField()
+	}
+
+	if msg.String() == "r" {
+		m.status = "Odświeżanie widoku walut w bazie..."
+		return m, loadCurrencyStatsCmd(m.store)
+	}
+
+	return m.updateDatabaseComponents(msg)
 }
 
 func (m *tuiModel) handleConverterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -357,27 +813,13 @@ func (m *tuiModel) handleConverterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.focus = (m.focus + 4) % 5
 		return m, m.focusCurrentField()
 	case "enter":
-		if m.focus == 3 {
-			m.direction = m.direction.next()
-			return m, nil
-		}
 		if m.focus == 4 && !m.loading {
 			return m.startConversion()
 		}
-		if m.focus == 1 || m.focus == 2 {
+		if m.focus == 1 || m.focus == 2 || m.focus == 3 {
 			m.focus = (m.focus + 1) % 5
 			return m, m.focusCurrentField()
 		}
-	case " ":
-		if m.focus == 3 {
-			m.direction = m.direction.next()
-			return m, nil
-		}
-	}
-
-	if key.Matches(msg, m.keys.ToggleDir) {
-		m.direction = m.direction.next()
-		return m, nil
 	}
 
 	return m.updateConverterComponents(msg)
@@ -385,6 +827,31 @@ func (m *tuiModel) handleConverterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 
 func (m *tuiModel) handleCacheKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "tab":
+		m.focus = (m.focus + 1) % 5
+		return m, m.focusCurrentField()
+	case "shift+tab":
+		m.focus = (m.focus + 4) % 5
+		return m, m.focusCurrentField()
+	case " ":
+		if m.focus == 2 {
+			m.allCacheCurrencies = !m.allCacheCurrencies
+			m.status = m.cacheSelectionStatus()
+			return m, nil
+		}
+	case "enter":
+		if m.focus == 3 {
+			m.currencyPickerOpen = true
+			return m, nil
+		}
+		if m.focus == 2 {
+			m.allCacheCurrencies = !m.allCacheCurrencies
+			m.status = m.cacheSelectionStatus()
+			return m, nil
+		}
+		if m.focus == 4 && !m.cacheBusy {
+			return m.startRangePrefetch()
+		}
 	case "r":
 		if m.cacheBusy {
 			return m, nil
@@ -400,7 +867,39 @@ func (m *tuiModel) handleCacheKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.status = "Czyszczenie bazy cache..."
 		return m, tea.Batch(clearCacheCmd(m.store), spinnerTickCmd(m.spinner))
 	}
+
+	if key.Matches(msg, m.keys.ToggleAll) {
+		m.allCacheCurrencies = !m.allCacheCurrencies
+		m.status = m.cacheSelectionStatus()
+		return m, nil
+	}
 	return m.updateCacheComponents(msg)
+}
+
+func (m *tuiModel) handleCurrencyPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+	case msg.String() == "esc":
+		m.currencyPickerOpen = false
+		return m, m.focusCurrentField()
+	}
+
+	switch msg.String() {
+	case "enter", " ":
+		m.toggleCurrentCacheCurrency()
+		return m, nil
+	}
+
+	if key.Matches(msg, m.keys.ToggleAll) {
+		m.allCacheCurrencies = !m.allCacheCurrencies
+		m.status = m.cacheSelectionStatus()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.cacheCurrencyList, cmd = m.cacheCurrencyList.Update(msg)
+	return m, cmd
 }
 
 func (m *tuiModel) updateConverterComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -414,12 +913,26 @@ func (m *tuiModel) updateConverterComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.focus == 1 {
-		m.amountInput, cmd = m.amountInput.Update(msg)
+		before := m.plnAmountInput.Value()
+		m.plnAmountInput, cmd = m.plnAmountInput.Update(msg)
+		if m.plnAmountInput.Value() != before {
+			m.lastEditedAmount = amountFieldPLN
+		}
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
 	if m.focus == 2 {
+		before := m.foreignAmountInput.Value()
+		m.foreignAmountInput, cmd = m.foreignAmountInput.Update(msg)
+		if m.foreignAmountInput.Value() != before {
+			m.lastEditedAmount = amountFieldForeign
+		}
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if m.focus == 3 {
 		m.dateInput, cmd = m.dateInput.Update(msg)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -434,9 +947,69 @@ func (m *tuiModel) updateConverterComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *tuiModel) updateCacheComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
 	var cmd tea.Cmd
+
+	if m.currencyPickerOpen {
+		m.cacheCurrencyList, cmd = m.cacheCurrencyList.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+	}
+
+	if m.focus == 0 {
+		m.cacheFromInput, cmd = m.cacheFromInput.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if m.focus == 1 {
+		m.cacheToInput, cmd = m.cacheToInput.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
 	m.cacheViewport, cmd = m.cacheViewport.Update(msg)
-	return m, cmd
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m *tuiModel) updateDatabaseComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	var cmd tea.Cmd
+
+	if m.focus == 0 {
+		before := m.dbFilterInput.Value()
+		m.dbFilterInput, cmd = m.dbFilterInput.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if before != m.dbFilterInput.Value() {
+			m.rebuildDBCurrencyList()
+		}
+	}
+	if m.focus == 2 {
+		beforeCode := m.selectedDBCurrency
+		m.dbCurrencyList, cmd = m.dbCurrencyList.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if stat, ok := m.selectedDBStat(); ok && !strings.EqualFold(stat.Code, beforeCode) {
+			m.selectedDBCurrency = stat.Code
+			m.selectedDBHistory = nil
+			cmds = append(cmds, loadCurrencyHistoryCmd(m.store, stat.Code, 120))
+		}
+	}
+
+	m.dbViewport, cmd = m.dbViewport.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m *tuiModel) startConversion() (tea.Model, tea.Cmd) {
@@ -453,43 +1026,105 @@ func (m *tuiModel) startConversion() (tea.Model, tea.Cmd) {
 	m.lastError = ""
 	m.status = "Pobieranie kursu i przeliczanie kwoty..."
 	return m, tea.Batch(
-		convertCurrencyCmd(m.service, m.cfg.TimeoutSeconds, currency, m.amountInput.Value(), m.dateInput.Value(), m.direction),
+		convertCurrencyCmd(m.service, m.cfg.TimeoutSeconds, currency, m.converterSourceAmount(), m.dateInput.Value(), m.converterDirection()),
 		spinnerTickCmd(m.spinner),
 	)
 }
 
 func (m *tuiModel) focusCurrentField() tea.Cmd {
-	m.amountInput.Blur()
+	m.plnAmountInput.Blur()
+	m.foreignAmountInput.Blur()
 	m.dateInput.Blur()
+	m.cacheFromInput.Blur()
+	m.cacheToInput.Blur()
+	m.dbFilterInput.Blur()
+
+	if m.activeTab == 0 {
+		switch m.focus {
+		case 1:
+			return m.plnAmountInput.Focus()
+		case 2:
+			return m.foreignAmountInput.Focus()
+		case 3:
+			return m.dateInput.Focus()
+		}
+		return nil
+	}
+	if m.activeTab == 2 {
+		if m.focus == 0 {
+			return m.dbFilterInput.Focus()
+		}
+		return nil
+	}
 
 	switch m.focus {
+	case 0:
+		return m.cacheFromInput.Focus()
 	case 1:
-		return m.amountInput.Focus()
-	case 2:
-		return m.dateInput.Focus()
+		return m.cacheToInput.Focus()
 	default:
 		return nil
 	}
 }
 
 func (m *tuiModel) resize() {
-	innerWidth := maxInt(m.width-8, 72)
-	innerHeight := maxInt(m.height-10, 16)
-	listWidth := maxInt(innerWidth/3, 28)
-	listHeight := maxInt(innerHeight, 12)
-	rightWidth := maxInt(innerWidth-listWidth-3, 36)
+	innerWidth := m.shellInnerWidth()
+	if innerWidth < 48 {
+		innerWidth = 48
+	}
+	innerHeight := m.bodyAreaHeight()
+	if innerHeight < 12 {
+		innerHeight = 12
+	}
+
+	listWidth := innerWidth
+	rightWidth := innerWidth
+	if innerWidth >= 110 {
+		listWidth = maxInt(innerWidth/3, 28)
+		rightWidth = innerWidth - listWidth - 1
+	}
+	listHeight := innerHeight
 
 	m.currencyList.SetSize(listWidth, listHeight)
-	m.amountInput.SetWidth(maxInt(rightWidth-8, 18))
+	m.plnAmountInput.SetWidth(maxInt(rightWidth-8, 18))
+	m.foreignAmountInput.SetWidth(maxInt(rightWidth-8, 18))
 	m.dateInput.SetWidth(maxInt(rightWidth-8, 18))
 	m.resultsViewport.SetWidth(rightWidth - 4)
 	m.resultsViewport.SetHeight(maxInt(innerHeight-13, 8))
+	m.cacheCurrencyList.SetSize(maxInt(minInt(innerWidth-12, 40), 24), maxInt(innerHeight-6, 10))
+	m.cacheFromInput.SetWidth(maxInt(innerWidth-8, 18))
+	m.cacheToInput.SetWidth(maxInt(innerWidth-8, 18))
 	m.cacheViewport.SetWidth(innerWidth - 4)
-	m.cacheViewport.SetHeight(maxInt(innerHeight-4, 10))
+	m.cacheViewport.SetHeight(maxInt(innerHeight-4, 8))
+	dbListWidth := maxInt(innerWidth/3, 28)
+	dbDetailWidth := innerWidth - dbListWidth - 5
+	m.dbFilterInput.SetWidth(maxInt(dbListWidth-6, 18))
+	m.dbCurrencyList.SetSize(dbListWidth, maxInt(innerHeight-6, 10))
+	m.dbViewport.SetWidth(maxInt(dbDetailWidth, 24))
+	m.dbViewport.SetHeight(maxInt(innerHeight-6, 10))
 	m.help.SetWidth(innerWidth)
 }
 
 func (m tuiModel) renderHeader() string {
+	return lipgloss.JoinVertical(lipgloss.Left, renderAsciiLogo(), m.renderTabs())
+}
+
+func renderAsciiLogo() string {
+	logo := strings.Join([]string{
+		" _  __                    _       _",
+		"| |/ /_   _ _ __ ___  ___| | ___ (_)_ __   ___ ",
+		"| ' /| | | | '__/ __|/ _ \\ |/ / | | '_ \\ / _ \\",
+		"| . \\| |_| | |  \\__ \\  __/   < _| | | | |  __/",
+		"|_|\\_\\\\__,_|_|  |___/\\___|_|\\_(_)_|_| |_|\\___|",
+	}, "\n")
+
+	return lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("14")).
+		Render(logo)
+}
+
+func (m tuiModel) renderTabs() string {
 	tabBase := lipgloss.NewStyle().
 		Padding(0, 2).
 		Bold(true)
@@ -497,26 +1132,34 @@ func (m tuiModel) renderHeader() string {
 	inactive := tabBase.Foreground(lipgloss.Color("252")).Background(lipgloss.Color("238"))
 
 	converterTab := inactive.Render("KONWERTER")
-	cacheTab := inactive.Render("BAZA CACHE")
+	walletTab := inactive.Render("BAZA WALUT")
+	dbTab := inactive.Render("WALUTY W BAZIE")
 	if m.activeTab == 0 {
 		converterTab = active.Render("KONWERTER")
+	} else if m.activeTab == 1 {
+		walletTab = active.Render("BAZA WALUT")
 	} else {
-		cacheTab = active.Render("BAZA CACHE")
+		dbTab = active.Render("WALUTY W BAZIE")
 	}
 
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("230")).
-		Background(lipgloss.Color("18")).
-		Padding(0, 2).
-		Render("KURSOWNIK NBP")
-
-	return lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", converterTab, " ", cacheTab)
+	return lipgloss.JoinHorizontal(lipgloss.Top, converterTab, " ", walletTab, " ", dbTab)
 }
 
 func (m tuiModel) renderBody() string {
 	if m.activeTab == 0 {
 		return m.renderConverterBody()
+	}
+	if m.activeTab == 2 {
+		return m.renderDatabaseBody()
+	}
+	if m.currencyPickerOpen {
+		return lipgloss.Place(
+			m.shellInnerWidth(),
+			m.bodyAreaHeight(),
+			lipgloss.Center,
+			lipgloss.Center,
+			m.renderCurrencyPickerModal(),
+		)
 	}
 	return m.renderCacheBody()
 }
@@ -531,12 +1174,14 @@ func (m tuiModel) renderConverterBody() string {
 		selectedName = currency.Name
 	}
 
-	directionButton := secondaryButtonStyle(m.focus == 3).Render(m.direction.label(selectedCode))
 	convertButtonLabel := "[ PRZELICZ ]"
 	if m.loading {
 		convertButtonLabel = m.spinner.View() + " PRZELICZANIE"
 	}
 	convertButton := primaryButtonStyle(m.focus == 4 && !m.loading).Render(convertButtonLabel)
+	autoDirection := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("248")).
+		Render("Auto kierunek: " + m.converterDirection().label(selectedCode))
 
 	resultTitle := lipgloss.NewStyle().
 		Bold(true).
@@ -545,18 +1190,27 @@ func (m tuiModel) renderConverterBody() string {
 		Padding(0, 1).
 		Render(strings.ToUpper("wynik i kurs z dnia"))
 
+	activeCurrencyStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("14")).
+		Background(lipgloss.Color("238")).
+		Padding(0, 1).
+		MarginBottom(1)
+
 	formLines := []string{
 		sectionTitle("AKTYWNA WALUTA"),
-		lipgloss.NewStyle().Bold(true).Render(selectedCode + "  " + selectedName),
+		activeCurrencyStyle.Render(fmt.Sprintf("%s - %s", strings.ToUpper(selectedCode), selectedName)),
 		"",
-		sectionTitle("KWOTA"),
-		m.amountInput.View(),
+		sectionTitle("KWOTA PLN"),
+		m.plnAmountInput.View(),
+		"",
+		sectionTitle("KWOTA " + strings.ToUpper(selectedCode)),
+		m.foreignAmountInput.View(),
+		"",
+		autoDirection,
 		"",
 		sectionTitle("DZIEŃ KURSU (RRRR-MM-DD)"),
 		m.dateInput.View(),
-		"",
-		sectionTitle("KIERUNEK"),
-		directionButton,
 		"",
 		convertButton,
 		"",
@@ -572,18 +1226,102 @@ func (m tuiModel) renderConverterBody() string {
 }
 
 func (m tuiModel) renderCacheBody() string {
-	body := m.cacheViewport.View()
+	allButton := secondaryButtonStyle(m.focus == 2).Render(m.cacheAllLabel())
+	pickerButton := secondaryButtonStyle(m.focus == 3).Render("[ WYBIERZ WALUTY ]")
+	importLabel := "[ POBIERZ ZAKRES ]"
 	if m.cacheBusy {
-		body = m.spinner.View() + " AKTUALIZACJA BAZY CACHE\n\n" + body
+		importLabel = m.spinner.View() + " POBIERANIE"
 	}
-	return cardStyle(false).Render(body)
+	importButton := primaryButtonStyle(m.focus == 4 && !m.cacheBusy).Render(importLabel)
+
+	formCard := cardStyle(m.focus <= 4).Render(strings.Join([]string{
+		sectionTitle("ZAKRES DAT DO BAZY"),
+		"Od:",
+		m.cacheFromInput.View(),
+		"",
+		"Do:",
+		m.cacheToInput.View(),
+		"",
+		sectionTitle("TRYB WALUT"),
+		allButton,
+		"",
+		sectionTitle("WYBÓR WALUT"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("248")).Render(m.cacheSelectionStatus()),
+		pickerButton,
+		"",
+		sectionTitle("AKCJA"),
+		importButton,
+		"",
+		sectionTitle("POSTĘP IMPORTU"),
+		m.progress.ViewAs(m.cachePercent()),
+	}, "\n"))
+
+	statsBody := m.cacheViewport.View()
+	if m.cacheBusy {
+		statsBody = m.spinner.View() + " AKTUALIZACJA BAZY WALUT\n\n" + statsBody
+	}
+	statsCard := cardStyle(false).Render(statsBody)
+
+	return lipgloss.JoinVertical(lipgloss.Left, formCard, " ", statsCard)
+}
+
+func (m tuiModel) renderDatabaseBody() string {
+	filterCard := cardStyle(m.focus == 0 || m.focus == 1 || m.focus == 2).Render(strings.Join([]string{
+		sectionTitle("FILTR"),
+		m.dbFilterInput.View(),
+		"",
+		sectionTitle("SORTOWANIE"),
+		secondaryButtonStyle(m.focus == 1).Render(m.dbSortMode.label()),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("248")).Render(fmt.Sprintf("Walut po filtrze: %d", len(m.filteredCurrencyStats))),
+		"",
+		m.dbCurrencyList.View(),
+	}, "\n"))
+
+	detailCard := cardStyle(m.focus == 3).Render(strings.Join([]string{
+		sectionTitle("SZCZEGÓŁY WALUTY"),
+		m.dbViewport.View(),
+	}, "\n"))
+
+	if m.shellInnerWidth() < 110 {
+		return lipgloss.JoinVertical(lipgloss.Left, filterCard, " ", detailCard)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, filterCard, " ", detailCard)
+}
+
+func (m tuiModel) renderCurrencyPickerModal() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("230")).
+		Background(lipgloss.Color("24")).
+		Padding(0, 1).
+		Render("WYBÓR WALUT DO IMPORTU")
+
+	footer := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("248")).
+		Render("Enter/Spacja: zaznacz • a: wszystkie • Esc: zamknij")
+
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.DoubleBorder()).
+		BorderForeground(lipgloss.Color("14")).
+		Padding(1, 1).
+		Width(maxInt(minInt(m.shellInnerWidth()-8, 44), 28)).
+		Render(strings.Join([]string{
+			title,
+			"",
+			m.cacheCurrencyList.View(),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color("248")).Render(m.cacheSelectionStatus()),
+			footer,
+		}, "\n"))
 }
 
 func (m tuiModel) renderStatus() string {
 	style := lipgloss.NewStyle().
 		Padding(0, 1).
 		Foreground(lipgloss.Color("252")).
-		Background(lipgloss.Color("236"))
+		Background(lipgloss.Color("236")).
+		Width(m.shellInnerWidth())
 
 	if m.lastError != "" {
 		return style.Foreground(lipgloss.Color("230")).Background(lipgloss.Color("1")).Render("BŁĄD: " + strings.ToUpper(m.lastError))
@@ -592,14 +1330,16 @@ func (m tuiModel) renderStatus() string {
 }
 
 func (m tuiModel) renderFooter() string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("248")).
+		Width(m.shellInnerWidth())
 	if m.activeTab == 1 {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("248")).Render(
-			m.help.View(cacheHelpMap{keys: m.keys}),
-		)
+		return style.Render(m.help.View(cacheHelpMap{keys: m.keys}))
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("248")).Render(
-		m.help.View(converterHelpMap{keys: m.keys}),
-	)
+	if m.activeTab == 2 {
+		return style.Render(m.help.View(databaseHelpMap{keys: m.keys}))
+	}
+	return style.Render(m.help.View(converterHelpMap{keys: m.keys}))
 }
 
 func (m tuiModel) selectedCurrency() (models.Currency, bool) {
@@ -610,48 +1350,294 @@ func (m tuiModel) selectedCurrency() (models.Currency, bool) {
 	return models.Currency{Code: item.code, Name: item.name}, true
 }
 
+func (m tuiModel) converterDirection() conversionDirection {
+	if m.lastEditedAmount == amountFieldForeign {
+		return directionForeignToPLN
+	}
+	return directionPLNToForeign
+}
+
+func (m tuiModel) converterSourceAmount() string {
+	if m.converterDirection() == directionForeignToPLN {
+		return m.foreignAmountInput.Value()
+	}
+	return m.plnAmountInput.Value()
+}
+
 func (m tuiModel) converterInputFocused() bool {
-	return m.activeTab == 0 && (m.focus == 1 || m.focus == 2)
+	return m.activeTab == 0 && (m.focus == 1 || m.focus == 2 || m.focus == 3)
+}
+
+func (m tuiModel) textInputFocused() bool {
+	return (m.activeTab == 0 && (m.focus == 1 || m.focus == 2 || m.focus == 3)) ||
+		(m.activeTab == 1 && (m.focus == 0 || m.focus == 1)) ||
+		(m.activeTab == 2 && m.focus == 0)
+}
+
+func (m tuiModel) canSwitchToPrevTab(msg tea.KeyPressMsg) bool {
+	return msg.String() == "ctrl+left" || (key.Matches(msg, m.keys.PrevTab) && !m.textInputFocused())
+}
+
+func (m tuiModel) canSwitchToNextTab(msg tea.KeyPressMsg) bool {
+	return msg.String() == "ctrl+right" || (key.Matches(msg, m.keys.NextTab) && !m.textInputFocused())
 }
 
 func (m tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
-	headerHeight := lipgloss.Height(m.renderHeader())
 	rootPaddingTop := 1
 	rootPaddingLeft := 2
+	shellOffsetX := 2
+	shellOffsetY := 2
 
 	return func(msg tea.MouseMsg) tea.Cmd {
-		if m.activeTab != 0 || m.focus == 1 || m.focus == 2 {
-			return nil
-		}
-
 		mouse := msg.Mouse()
 		if mouse.Button != tea.MouseLeft {
 			return nil
 		}
 
-		listX := rootPaddingLeft
-		listY := rootPaddingTop + headerHeight
-		listCardWidth := lipgloss.Width(cardStyle(m.focus == 0).Render(m.currencyList.View()))
-		listContentY := listY + 4
-
-		if mouse.X < listX || mouse.X >= listX+listCardWidth {
-			return nil
+		contentX := rootPaddingLeft + shellOffsetX
+		contentY := rootPaddingTop + shellOffsetY
+		logoHeight := lipgloss.Height(renderAsciiLogo())
+		tabY := contentY + logoHeight
+		if hitRect(mouse.X, mouse.Y, contentX, tabY, 14, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "tab-converter"} }
 		}
-		if mouse.Y < listContentY {
-			return nil
+		if hitRect(mouse.X, mouse.Y, contentX+15, tabY, 16, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "tab-cache"} }
 		}
-
-		row := mouse.Y - listContentY
-		pageStart := m.currencyList.Index() - m.currencyList.Cursor()
-		itemIndex := pageStart + row
-		visibleItems := m.currencyList.VisibleItems()
-		if itemIndex < 0 || itemIndex >= len(visibleItems) {
-			return nil
+		if hitRect(mouse.X, mouse.Y, contentX+32, tabY, 20, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "tab-db"} }
 		}
 
-		return func() tea.Msg {
-			return currencyClickedMsg{index: itemIndex}
+		bodyY := contentY + lipgloss.Height(m.renderHeader())
+
+		if m.currencyPickerOpen {
+			modal := m.renderCurrencyPickerModal()
+			modalWidth := lipgloss.Width(modal)
+			modalHeight := lipgloss.Height(modal)
+			modalX := contentX + maxInt((m.shellInnerWidth()-modalWidth)/2, 0)
+			modalY := bodyY + maxInt((m.bodyAreaHeight()-modalHeight)/2, 0)
+			listX := modalX + 2
+			listY := modalY + 4
+			if hitRect(mouse.X, mouse.Y, listX, listY, modalWidth-4, modalHeight-6) {
+				row := mouse.Y - listY
+				pageStart := m.cacheCurrencyList.Index() - m.cacheCurrencyList.Cursor()
+				itemIndex := pageStart + row
+				visibleItems := m.cacheCurrencyList.VisibleItems()
+				if itemIndex >= 0 && itemIndex < len(visibleItems) {
+					return func() tea.Msg {
+						return currencyClickedMsg{target: "cache", index: itemIndex}
+					}
+				}
+			}
+			return func() tea.Msg { return mouseActionMsg{action: "close-currency-picker"} }
 		}
+
+		if m.activeTab == 0 {
+			listX := contentX
+			listY := bodyY
+			listCardWidth := lipgloss.Width(cardStyle(m.focus == 0).Render(m.currencyList.View()))
+			listContentY := listY + 4
+
+			if mouse.X >= listX && mouse.X < listX+listCardWidth && mouse.Y >= listContentY {
+				row := mouse.Y - listContentY
+				pageStart := m.currencyList.Index() - m.currencyList.Cursor()
+				itemIndex := pageStart + row
+				visibleItems := m.currencyList.VisibleItems()
+				if itemIndex >= 0 && itemIndex < len(visibleItems) {
+					return func() tea.Msg {
+						return currencyClickedMsg{target: "converter", index: itemIndex}
+					}
+				}
+			}
+
+			listCardRendered := cardStyle(m.focus == 0).Render(m.currencyList.View())
+			listCardWidth = lipgloss.Width(listCardRendered)
+			rightX := contentX
+			if m.width >= 110 {
+				rightX = listX + listCardWidth + 1
+			}
+			if m.width < 110 {
+				rightX = contentX
+				bodyY = bodyY + lipgloss.Height(listCardRendered)
+			}
+			rightY := bodyY
+			contentStartY := rightY + 2
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+4, 28, 1) {
+				return func() tea.Msg { return mouseActionMsg{action: "focus-amount"} }
+			}
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+8, 28, 1) {
+				return func() tea.Msg { return mouseActionMsg{action: "focus-foreign-amount"} }
+			}
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+12, 28, 1) {
+				return func() tea.Msg { return mouseActionMsg{action: "focus-date"} }
+			}
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+14, 24, 1) {
+				return func() tea.Msg { return mouseActionMsg{action: "convert"} }
+			}
+			return nil
+		}
+
+		if m.activeTab == 2 {
+			leftX := contentX
+			leftY := bodyY
+			leftWidth := maxInt(m.shellInnerWidth()/3, 28)
+			if m.shellInnerWidth() < 110 {
+				leftWidth = m.shellInnerWidth()
+			}
+			if hitRect(mouse.X, mouse.Y, leftX+2, leftY+4, leftWidth-4, 1) {
+				return func() tea.Msg { return mouseActionMsg{action: "focus-db-filter"} }
+			}
+			if hitRect(mouse.X, mouse.Y, leftX+2, leftY+8, leftWidth-4, 1) {
+				return func() tea.Msg { return mouseActionMsg{action: "toggle-db-sort"} }
+			}
+			listY := leftY + 12
+			if hitRect(mouse.X, mouse.Y, leftX+1, listY, leftWidth-2, maxInt(m.bodyAreaHeight()-14, 6)) {
+				row := mouse.Y - listY
+				pageStart := m.dbCurrencyList.Index() - m.dbCurrencyList.Cursor()
+				itemIndex := pageStart + row
+				visibleItems := m.dbCurrencyList.VisibleItems()
+				if itemIndex >= 0 && itemIndex < len(visibleItems) {
+					return func() tea.Msg { return currencyClickedMsg{target: "db", index: itemIndex} }
+				}
+			}
+			return nil
+		}
+
+		formX := contentX
+		formContentY := bodyY + 2
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+2, 28, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "focus-cache-from"} }
+		}
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+5, 28, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "focus-cache-to"} }
+		}
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+8, 28, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "toggle-all-cache"} }
+		}
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+12, 26, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "open-currency-picker"} }
+		}
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+16, 26, 1) {
+			return func() tea.Msg { return mouseActionMsg{action: "prefetch-cache"} }
+		}
+		return nil
+	}
+}
+
+func (m *tuiModel) startRangePrefetch() (tea.Model, tea.Cmd) {
+	startDate, err := ParseDate(m.cacheFromInput.Value())
+	if err != nil {
+		m.lastError = err.Error()
+		return m, nil
+	}
+	endDate, err := ParseDate(m.cacheToInput.Value())
+	if err != nil {
+		m.lastError = err.Error()
+		return m, nil
+	}
+
+	currencies := m.selectedCacheCurrencyCodes()
+	if len(currencies) == 0 {
+		m.lastError = "wybierz co najmniej jedną walutę lub użyj opcji wszystkie"
+		return m, nil
+	}
+
+	chunks := buildPrefetchChunks(currencies, startDate, endDate)
+	if len(chunks) == 0 {
+		m.lastError = "brak danych do pobrania w podanym zakresie"
+		return m, nil
+	}
+
+	m.cacheBusy = true
+	m.lastError = ""
+	m.prefetchChunks = nil
+	m.prefetchDone = 0
+	m.prefetchSummary = nbp.PrefetchSummary{
+		CurrencyCount: len(currencies),
+		RateCount:     0,
+		StartDate:     startDate.Format("2006-01-02"),
+		EndDate:       endDate.Format("2006-01-02"),
+	}
+	m.status = fmt.Sprintf("Pobieranie zakresu %s -> %s do bazy cache...", startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	m.prefetchChunks = chunks[1:]
+	cmds := []tea.Cmd{
+		m.progress.SetPercent(0),
+		prefetchChunkCmd(m.service, m.cfg.TimeoutSeconds, chunks[0]),
+		spinnerTickCmd(m.spinner),
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m *tuiModel) refreshCacheViewport() {
+	width := m.cacheViewport.Width()
+	if width <= 0 {
+		width = 60
+	}
+
+	lines := []string{renderCacheInfo(m.cacheInfo, width-2)}
+	if m.prefetchSummary.CurrencyCount > 0 {
+		lines = append(lines,
+			"",
+			sectionTitle("OSTATNI IMPORT ZAKRESU"),
+			fmt.Sprintf("Walut: %d", m.prefetchSummary.CurrencyCount),
+			fmt.Sprintf("Kursów: %d", m.prefetchSummary.RateCount),
+			fmt.Sprintf("Zakres: %s -> %s", m.prefetchSummary.StartDate, m.prefetchSummary.EndDate),
+		)
+	}
+
+	m.cacheViewport.SetContent(strings.Join(lines, "\n"))
+}
+
+func (m *tuiModel) refreshDBViewport() {
+	stat, ok := m.selectedDBStat()
+	if !ok {
+		m.dbViewport.SetContent("Wybierz walutę z listy, aby zobaczyć historię kursów.")
+		return
+	}
+
+	lines := []string{
+		sectionTitle("SZCZEGÓŁY WALUTY"),
+		fmt.Sprintf("Kod: %s", stat.Code),
+		fmt.Sprintf("Nazwa: %s", stat.Name),
+		fmt.Sprintf("Liczba kursów: %d", stat.RateCount),
+		fmt.Sprintf("Pierwszy dzień: %s", orDash(stat.FirstDate)),
+		fmt.Sprintf("Ostatni dzień: %s", orDash(stat.LastDate)),
+		"",
+		sectionTitle("HISTORIA KURSÓW"),
+	}
+	if len(m.selectedDBHistory) == 0 {
+		lines = append(lines, "Brak historii kursów dla wybranej waluty.")
+		m.dbViewport.SetContent(strings.Join(lines, "\n"))
+		return
+	}
+
+	for _, entry := range m.selectedDBHistory {
+		lines = append(lines,
+			fmt.Sprintf("%s | %.4f | %s", entry.EffectiveRateDate, entry.Mid, orDash(entry.TableNo)),
+		)
+	}
+	m.dbViewport.SetContent(strings.Join(lines, "\n"))
+}
+
+func (m dbSortMode) next() dbSortMode {
+	switch m {
+	case dbSortByCode:
+		return dbSortByRateCount
+	case dbSortByRateCount:
+		return dbSortByLastDate
+	default:
+		return dbSortByCode
+	}
+}
+
+func (m dbSortMode) label() string {
+	switch m {
+	case dbSortByRateCount:
+		return "WG LICZBY KURSÓW"
+	case dbSortByLastDate:
+		return "WG OSTATNIEJ DATY"
+	default:
+		return "WG KODU"
 	}
 }
 
@@ -666,6 +1652,20 @@ func loadCurrenciesCmd(service *nbp.Service, timeoutSeconds int) tea.Cmd {
 
 		currencies, err := service.GetCurrencies(ctx)
 		return currenciesLoadedMsg{currencies: currencies, err: err}
+	}
+}
+
+func prefetchChunkCmd(service *nbp.Service, timeoutSeconds int, chunk prefetchChunk) tea.Cmd {
+	return func() tea.Msg {
+		timeout := time.Duration(timeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		count, err := service.ImportRateRangeChunk(ctx, chunk.currency, chunk.start, chunk.end)
+		return prefetchChunkFinishedMsg{chunk: chunk, rateCount: count, err: err}
 	}
 }
 
@@ -729,7 +1729,12 @@ func convertCurrencyCmd(service *nbp.Service, timeoutSeconds int, currency model
 			fmt.Sprintf("Źródło: %s", rate.Source),
 		}, "\n")
 
-		return convertFinishedMsg{result: result}
+		return convertFinishedMsg{
+			result:       result,
+			direction:    direction,
+			sourceAmount: amount,
+			targetAmount: converted,
+		}
 	}
 }
 
@@ -737,6 +1742,20 @@ func loadCacheInfoCmd(store cache.Store) tea.Cmd {
 	return func() tea.Msg {
 		info, err := store.Info()
 		return cacheInfoLoadedMsg{info: info, err: err}
+	}
+}
+
+func loadCurrencyStatsCmd(store cache.Store) tea.Cmd {
+	return func() tea.Msg {
+		stats, err := store.ListCurrencyStats()
+		return currencyStatsLoadedMsg{stats: stats, err: err}
+	}
+}
+
+func loadCurrencyHistoryCmd(store cache.Store, currency string, limit int) tea.Cmd {
+	return func() tea.Msg {
+		history, err := store.ListCurrencyHistory(currency, limit)
+		return currencyHistoryLoadedMsg{currency: currency, history: history, err: err}
 	}
 }
 
@@ -753,10 +1772,11 @@ func spinnerTickCmd(model spinner.Model) tea.Cmd {
 	}
 }
 
-func renderCacheInfo(info cache.Info) string {
+func renderCacheInfo(info cache.Info, width int) string {
+	pathLines := wrapPath(info.Path, maxInt(width, 24))
 	return strings.Join([]string{
 		sectionTitle("PLIK BAZY"),
-		info.Path,
+		pathLines,
 		"",
 		sectionTitle("STATYSTYKI"),
 		fmt.Sprintf("Zapisanych kursów: %d", info.Entries),
@@ -767,9 +1787,219 @@ func renderCacheInfo(info cache.Info) string {
 		"",
 		sectionTitle("AKCJE"),
 		"/ - szukaj waluty w pickerze",
+		"spacja/enter - zaznacz walutę",
+		"a - przełącz wszystkie waluty",
 		"r - odśwież statystyki",
 		"c - wyczyść całą bazę cache",
 	}, "\n")
+}
+
+func buildPrefetchChunks(currencies []string, startDate, endDate time.Time) []prefetchChunk {
+	const chunkDays = 90
+	chunks := make([]prefetchChunk, 0, len(currencies)*4)
+	for _, currency := range currencies {
+		for chunkStart := startDate; !chunkStart.After(endDate); chunkStart = chunkStart.AddDate(0, 0, chunkDays+1) {
+			chunkEnd := chunkStart.AddDate(0, 0, chunkDays)
+			if chunkEnd.After(endDate) {
+				chunkEnd = endDate
+			}
+			chunks = append(chunks, prefetchChunk{
+				currency: currency,
+				start:    chunkStart,
+				end:      chunkEnd,
+			})
+		}
+	}
+	return chunks
+}
+
+func wrapPath(path string, width int) string {
+	if width <= 0 || len(path) <= width {
+		return path
+	}
+
+	replacer := strings.NewReplacer("\\", "\\|", "/", "/|")
+	parts := strings.Split(replacer.Replace(path), "|")
+	lines := make([]string, 0, len(parts))
+	current := ""
+
+	for _, part := range parts {
+		if current == "" {
+			current = part
+			continue
+		}
+		if len(current)+len(part) <= width {
+			current += part
+			continue
+		}
+		lines = append(lines, current)
+		current = part
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func batchCmds(cmds ...tea.Cmd) tea.Cmd {
+	filtered := make([]tea.Cmd, 0, len(cmds))
+	for _, cmd := range cmds {
+		if cmd != nil {
+			filtered = append(filtered, cmd)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return tea.Batch(filtered...)
+}
+
+func (m *tuiModel) syncCacheCurrencyList() tea.Cmd {
+	items := make([]list.Item, 0, len(m.currencies))
+	for _, currency := range m.currencies {
+		items = append(items, currencyItem{
+			code:     currency.Code,
+			name:     currency.Name,
+			selected: m.selectedCacheCurrencies[currency.Code],
+		})
+	}
+	cmd := m.cacheCurrencyList.SetItems(items)
+	if len(items) > 0 && m.cacheCurrencyList.Index() >= len(items) {
+		m.cacheCurrencyList.Select(len(items) - 1)
+	}
+	return cmd
+}
+
+func (m *tuiModel) rebuildDBCurrencyList() {
+	filter := strings.ToLower(strings.TrimSpace(m.dbFilterInput.Value()))
+	stats := make([]cache.CurrencyStat, 0, len(m.currencyStats))
+	for _, stat := range m.currencyStats {
+		if filter == "" || strings.Contains(strings.ToLower(stat.Code+" "+stat.Name), filter) {
+			stats = append(stats, stat)
+		}
+	}
+
+	switch m.dbSortMode {
+	case dbSortByRateCount:
+		sort.SliceStable(stats, func(i, j int) bool {
+			if stats[i].RateCount == stats[j].RateCount {
+				return stats[i].Code < stats[j].Code
+			}
+			return stats[i].RateCount > stats[j].RateCount
+		})
+	case dbSortByLastDate:
+		sort.SliceStable(stats, func(i, j int) bool {
+			if stats[i].LastDate == stats[j].LastDate {
+				return stats[i].Code < stats[j].Code
+			}
+			return stats[i].LastDate > stats[j].LastDate
+		})
+	default:
+		sort.SliceStable(stats, func(i, j int) bool {
+			return stats[i].Code < stats[j].Code
+		})
+	}
+
+	m.filteredCurrencyStats = stats
+	items := make([]list.Item, 0, len(stats))
+	selectedIndex := 0
+	for i, stat := range stats {
+		items = append(items, dbCurrencyItem{stat: stat})
+		if strings.EqualFold(stat.Code, m.selectedDBCurrency) {
+			selectedIndex = i
+		}
+	}
+	_ = m.dbCurrencyList.SetItems(items)
+
+	if len(items) == 0 {
+		m.dbCurrencyList.ResetSelected()
+		m.selectedDBCurrency = ""
+		m.selectedDBHistory = nil
+		m.refreshDBViewport()
+		return
+	}
+
+	m.dbCurrencyList.Select(selectedIndex)
+	selected, ok := m.selectedDBStat()
+	if ok && !strings.EqualFold(selected.Code, m.selectedDBCurrency) {
+		m.selectedDBCurrency = selected.Code
+		m.selectedDBHistory = nil
+	}
+	m.refreshDBViewport()
+}
+
+func (m tuiModel) selectedDBStat() (cache.CurrencyStat, bool) {
+	item, ok := m.dbCurrencyList.SelectedItem().(dbCurrencyItem)
+	if !ok {
+		return cache.CurrencyStat{}, false
+	}
+	return item.stat, true
+}
+
+func (m *tuiModel) loadSelectedDBCurrencyHistory() (tea.Model, tea.Cmd) {
+	stat, ok := m.selectedDBStat()
+	if !ok {
+		return m, nil
+	}
+	m.selectedDBCurrency = stat.Code
+	m.status = fmt.Sprintf("Ładowanie historii waluty %s...", stat.Code)
+	return m, loadCurrencyHistoryCmd(m.store, stat.Code, 120)
+}
+
+func (m *tuiModel) toggleCurrentCacheCurrency() {
+	item, ok := m.cacheCurrencyList.SelectedItem().(currencyItem)
+	if !ok {
+		return
+	}
+	code := strings.ToUpper(item.code)
+	if m.selectedCacheCurrencies[code] {
+		delete(m.selectedCacheCurrencies, code)
+	} else {
+		m.selectedCacheCurrencies[code] = true
+	}
+	_ = m.syncCacheCurrencyList()
+	m.status = m.cacheSelectionStatus()
+}
+
+func (m tuiModel) selectedCacheCurrencyCodes() []string {
+	if m.allCacheCurrencies {
+		codes := make([]string, 0, len(m.currencies))
+		for _, currency := range m.currencies {
+			codes = append(codes, currency.Code)
+		}
+		return codes
+	}
+
+	codes := make([]string, 0, len(m.selectedCacheCurrencies))
+	for _, currency := range m.currencies {
+		if m.selectedCacheCurrencies[currency.Code] {
+			codes = append(codes, currency.Code)
+		}
+	}
+	return codes
+}
+
+func (m tuiModel) cacheAllLabel() string {
+	if m.allCacheCurrencies {
+		return "[x] WSZYSTKIE WALUTY"
+	}
+	return "[ ] WSZYSTKIE WALUTY"
+}
+
+func (m tuiModel) cacheSelectionStatus() string {
+	if m.allCacheCurrencies {
+		return fmt.Sprintf("Wybrane wszystkie waluty: %d", len(m.currencies))
+	}
+	return fmt.Sprintf("Wybranych walut: %d", len(m.selectedCacheCurrencies))
+}
+
+func (m tuiModel) cachePercent() float64 {
+	total := len(m.prefetchChunks) + m.prefetchDone
+	if total == 0 {
+		return 0
+	}
+	return float64(m.prefetchDone) / float64(total)
 }
 
 func cardStyle(focused bool) lipgloss.Style {
@@ -780,6 +2010,38 @@ func cardStyle(focused bool) lipgloss.Style {
 		return style.BorderForeground(lipgloss.Color("12"))
 	}
 	return style.BorderForeground(lipgloss.Color("8"))
+}
+
+func shellStyle(width int) lipgloss.Style {
+	shellWidth := width - 6
+	if shellWidth < 24 {
+		shellWidth = 24
+	}
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.ThickBorder()).
+		BorderForeground(lipgloss.Color("12")).
+		Padding(1, 1).
+		Width(shellWidth)
+}
+
+func (m tuiModel) shellInnerWidth() int {
+	width := m.width - 10
+	if width < 24 {
+		return 24
+	}
+	return width
+}
+
+func (m tuiModel) bodyAreaHeight() int {
+	height := m.height - lipgloss.Height(m.renderHeader()) - lipgloss.Height(m.renderStatus()) - lipgloss.Height(m.renderFooter()) - 8
+	if height < 10 {
+		return 10
+	}
+	return height
+}
+
+func hitRect(x, y, left, top, width, height int) bool {
+	return x >= left && x < left+width && y >= top && y < top+height
 }
 
 func sectionTitle(label string) string {
@@ -833,13 +2095,13 @@ type converterHelpMap struct {
 }
 
 func (m converterHelpMap) ShortHelp() []key.Binding {
-	return []key.Binding{m.keys.Search, m.keys.ToggleDir, m.keys.NextFocus, m.keys.Quit}
+	return []key.Binding{m.keys.Search, m.keys.NextFocus, m.keys.Quit}
 }
 
 func (m converterHelpMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{m.keys.PrevTab, m.keys.NextTab, m.keys.NextFocus, m.keys.PrevFocus},
-		{m.keys.Search, m.keys.ToggleDir, m.keys.ToggleHelp, m.keys.Quit},
+		{m.keys.Search, m.keys.ToggleHelp, m.keys.Quit},
 	}
 }
 
@@ -848,12 +2110,29 @@ type cacheHelpMap struct {
 }
 
 func (m cacheHelpMap) ShortHelp() []key.Binding {
-	return []key.Binding{m.keys.PrevTab, m.keys.NextTab, m.keys.Refresh, m.keys.ClearCache, m.keys.Quit}
+	return []key.Binding{m.keys.Search, m.keys.ToggleAll, m.keys.Refresh, m.keys.ClearCache, m.keys.Quit}
 }
 
 func (m cacheHelpMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{m.keys.PrevTab, m.keys.NextTab, m.keys.Refresh, m.keys.ClearCache},
+		{m.keys.PrevTab, m.keys.NextTab, m.keys.NextFocus, m.keys.PrevFocus},
+		{m.keys.Search, m.keys.ToggleAll, m.keys.Refresh, m.keys.ClearCache},
+		{m.keys.ToggleHelp, m.keys.Quit},
+	}
+}
+
+type databaseHelpMap struct {
+	keys tuiKeyMap
+}
+
+func (m databaseHelpMap) ShortHelp() []key.Binding {
+	return []key.Binding{m.keys.Search, m.keys.Refresh, m.keys.NextFocus, m.keys.Quit}
+}
+
+func (m databaseHelpMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{m.keys.PrevTab, m.keys.NextTab, m.keys.NextFocus, m.keys.PrevFocus},
+		{m.keys.Search, m.keys.Refresh},
 		{m.keys.ToggleHelp, m.keys.Quit},
 	}
 }
@@ -863,4 +2142,15 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func formatAmount(value float64) string {
+	return fmt.Sprintf("%.4f", value)
 }

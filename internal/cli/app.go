@@ -21,8 +21,50 @@ type App struct {
 	err io.Writer
 }
 
+type configOptions struct {
+	configPath     string
+	cachePath      string
+	timeoutSeconds int
+	retryCount     int
+	lookbackDays   int
+	verbose        bool
+}
+
 func NewApp(out, err io.Writer) *App {
 	return &App{out: out, err: err}
+}
+
+func (a *App) registerCommonFlags(fs *flag.FlagSet, opts *configOptions) {
+	fs.StringVar(&opts.configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
+	fs.StringVar(&opts.cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
+	fs.IntVar(&opts.timeoutSeconds, "timeout", -1, "Timeout żądania HTTP w sekundach")
+	fs.IntVar(&opts.retryCount, "retry", -1, "Liczba retry dla błędów sieciowych")
+	fs.IntVar(&opts.lookbackDays, "lookback-days", -1, "Maksymalny zakres cofnięcia daty przy szukaniu kursu")
+	fs.BoolVar(&opts.verbose, "verbose", false, "Włącz dodatkowe logi diagnostyczne")
+}
+
+func (a *App) prepareConfig(opts configOptions) (models.AppConfig, error) {
+	cfg, err := LoadConfig(opts.configPath)
+	if err != nil {
+		return cfg, err
+	}
+	if opts.cachePath != "" {
+		cfg.CachePath = opts.cachePath
+	}
+	if opts.timeoutSeconds > 0 {
+		cfg.TimeoutSeconds = opts.timeoutSeconds
+	}
+	if opts.retryCount >= 0 {
+		cfg.RetryCount = opts.retryCount
+	}
+	if opts.lookbackDays > 0 {
+		cfg.MaxLookbackDays = opts.lookbackDays
+	}
+	if opts.verbose {
+		cfg.Verbose = true
+	}
+	cfg.Normalize()
+	return cfg, nil
 }
 
 func (a *App) Run(args []string) int {
@@ -52,26 +94,16 @@ func (a *App) runRate(args []string) int {
 	fs.SetOutput(a.err)
 
 	var (
-		currencyInput  string
-		dateInput      string
-		outputInput    string
-		configPath     string
-		cachePath      string
-		timeoutSeconds int
-		retryCount     int
-		lookbackDays   int
-		verbose        bool
+		currencyInput string
+		dateInput     string
+		outputInput   string
+		opts          configOptions
 	)
 
 	fs.StringVar(&currencyInput, "currency", "", "Kod waluty lub lista walut oddzielona przecinkiem (np. USD,EUR)")
 	fs.StringVar(&dateInput, "date", "", "Data w formacie YYYY-MM-DD")
 	fs.StringVar(&outputInput, "output", string(models.OutputText), "Format wyjścia: text | json")
-	fs.StringVar(&configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
-	fs.StringVar(&cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
-	fs.IntVar(&timeoutSeconds, "timeout", -1, "Timeout żądania HTTP w sekundach")
-	fs.IntVar(&retryCount, "retry", -1, "Liczba retry dla błędów sieciowych")
-	fs.IntVar(&lookbackDays, "lookback-days", -1, "Maksymalny zakres cofnięcia daty przy szukaniu kursu")
-	fs.BoolVar(&verbose, "verbose", false, "Włącz dodatkowe logi diagnostyczne")
+	a.registerCommonFlags(fs, &opts)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -80,27 +112,11 @@ func (a *App) runRate(args []string) int {
 		return 1
 	}
 
-	cfg, err := LoadConfig(configPath)
+	cfg, err := a.prepareConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
 	}
-	if cachePath != "" {
-		cfg.CachePath = cachePath
-	}
-	if timeoutSeconds > 0 {
-		cfg.TimeoutSeconds = timeoutSeconds
-	}
-	if retryCount >= 0 {
-		cfg.RetryCount = retryCount
-	}
-	if lookbackDays > 0 {
-		cfg.MaxLookbackDays = lookbackDays
-	}
-	if verbose {
-		cfg.Verbose = true
-	}
-	cfg.Normalize()
 
 	currencies, err := ParseCurrencies(currencyInput)
 	if err != nil {
@@ -151,21 +167,8 @@ func (a *App) runTUI(args []string) int {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 
-	var (
-		configPath     string
-		cachePath      string
-		timeoutSeconds int
-		retryCount     int
-		lookbackDays   int
-		verbose        bool
-	)
-
-	fs.StringVar(&configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
-	fs.StringVar(&cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
-	fs.IntVar(&timeoutSeconds, "timeout", -1, "Timeout żądania HTTP w sekundach")
-	fs.IntVar(&retryCount, "retry", -1, "Liczba retry dla błędów sieciowych")
-	fs.IntVar(&lookbackDays, "lookback-days", -1, "Maksymalny zakres cofnięcia daty przy szukaniu kursu")
-	fs.BoolVar(&verbose, "verbose", false, "Włącz dodatkowe logi diagnostyczne")
+	var opts configOptions
+	a.registerCommonFlags(fs, &opts)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -174,27 +177,11 @@ func (a *App) runTUI(args []string) int {
 		return 1
 	}
 
-	cfg, err := LoadConfig(configPath)
+	cfg, err := a.prepareConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
 	}
-	if cachePath != "" {
-		cfg.CachePath = cachePath
-	}
-	if timeoutSeconds > 0 {
-		cfg.TimeoutSeconds = timeoutSeconds
-	}
-	if retryCount >= 0 {
-		cfg.RetryCount = retryCount
-	}
-	if lookbackDays > 0 {
-		cfg.MaxLookbackDays = lookbackDays
-	}
-	if verbose {
-		cfg.Verbose = true
-	}
-	cfg.Normalize()
 
 	store, err := cache.NewFileStore(cfg.CachePath)
 	if err != nil {
@@ -207,11 +194,12 @@ func (a *App) runTUI(args []string) int {
 		RetryCount:      cfg.RetryCount,
 		MaxLookbackDays: cfg.MaxLookbackDays,
 		Verbose:         cfg.Verbose,
+		IsTUI:           true,
 	})
 	service := nbp.NewService(client, store)
 
 	model := newTUIModel(cfg, service, store)
-	program := tea.NewProgram(model)
+	program := tea.NewProgram(&model)
 	if _, err := program.Run(); err != nil {
 		a.printError(err)
 		return 1
@@ -243,10 +231,9 @@ func (a *App) runCache(args []string) int {
 func (a *App) runCacheClear(args []string) int {
 	fs := flag.NewFlagSet("cache clear", flag.ContinueOnError)
 	fs.SetOutput(a.err)
-	var configPath string
-	var cachePath string
-	fs.StringVar(&configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
-	fs.StringVar(&cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
+	var opts configOptions
+	fs.StringVar(&opts.configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
+	fs.StringVar(&opts.cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -254,15 +241,11 @@ func (a *App) runCacheClear(args []string) int {
 		return 1
 	}
 
-	cfg, err := LoadConfig(configPath)
+	cfg, err := a.prepareConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
 	}
-	if cachePath != "" {
-		cfg.CachePath = cachePath
-	}
-	cfg.Normalize()
 
 	store, err := cache.NewFileStore(cfg.CachePath)
 	if err != nil {
@@ -281,10 +264,9 @@ func (a *App) runCacheClear(args []string) int {
 func (a *App) runCacheInfo(args []string) int {
 	fs := flag.NewFlagSet("cache info", flag.ContinueOnError)
 	fs.SetOutput(a.err)
-	var configPath string
-	var cachePath string
-	fs.StringVar(&configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
-	fs.StringVar(&cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
+	var opts configOptions
+	fs.StringVar(&opts.configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
+	fs.StringVar(&opts.cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -292,15 +274,11 @@ func (a *App) runCacheInfo(args []string) int {
 		return 1
 	}
 
-	cfg, err := LoadConfig(configPath)
+	cfg, err := a.prepareConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
 	}
-	if cachePath != "" {
-		cfg.CachePath = cachePath
-	}
-	cfg.Normalize()
 
 	store, err := cache.NewFileStore(cfg.CachePath)
 	if err != nil {

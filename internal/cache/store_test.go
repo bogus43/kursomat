@@ -70,6 +70,36 @@ func TestFileStoreCurrencyCache(t *testing.T) {
 	}
 }
 
+func TestFileStoreGetLatestRate(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, err := NewFileStore(path)
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	defer store.Close()
+
+	err = store.StoreHistoricalRates("USD", []models.NBPRate{
+		{Currency: "USD", EffectiveRateDate: "2026-04-10", Mid: 3.80, TableNo: "070/A/NBP/2026"},
+		{Currency: "USD", EffectiveRateDate: "2026-04-13", Mid: 3.81, TableNo: "071/A/NBP/2026"},
+	})
+	if err != nil {
+		t.Fatalf("StoreHistoricalRates() error = %v", err)
+	}
+
+	got, found, err := store.GetLatestRate("USD", "2026-04-14")
+	if err != nil {
+		t.Fatalf("GetLatestRate() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("expected historical rate to be found")
+	}
+	if got.EffectiveRateDate != "2026-04-13" {
+		t.Fatalf("expected 2026-04-13, got %s", got.EffectiveRateDate)
+	}
+}
+
 func TestNewFileStoreCreatesMissingCacheFile(t *testing.T) {
 	t.Parallel()
 

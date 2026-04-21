@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"kursomat/internal/models"
 )
@@ -21,7 +22,7 @@ func LoadConfig(configPath string) (models.AppConfig, error) {
 	cfg := models.DefaultConfig()
 	cfg.Normalize()
 
-	path := stringsTrim(configPath)
+	path := strings.TrimSpace(configPath)
 	if path == "" {
 		path = models.DefaultConfigPath()
 	}
@@ -121,25 +122,11 @@ func ensureCacheFile(path string) error {
 }
 
 func ensureDir(path, label string) error {
-	if stringsTrim(path) == "" || path == "." {
+	if strings.TrimSpace(path) == "" || path == "." {
 		return nil
 	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return fmt.Errorf("nie udało się utworzyć %s (%s): %w", label, path, err)
 	}
 	return nil
-}
-
-func stringsTrim(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r') {
-		s = s[1:]
-	}
-	for len(s) > 0 {
-		last := s[len(s)-1]
-		if last != ' ' && last != '\t' && last != '\n' && last != '\r' {
-			break
-		}
-		s = s[:len(s)-1]
-	}
-	return s
 }

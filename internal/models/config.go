@@ -24,7 +24,7 @@ type AppConfig struct {
 
 func DefaultConfig() AppConfig {
 	return AppConfig{
-		CachePath:       defaultCachePath(),
+		CachePath:       DefaultCachePath(),
 		TimeoutSeconds:  DefaultTimeoutSeconds,
 		RetryCount:      DefaultRetryCount,
 		MaxLookbackDays: DefaultMaxLookback,
@@ -34,7 +34,7 @@ func DefaultConfig() AppConfig {
 
 func (c *AppConfig) Normalize() {
 	if c.CachePath == "" {
-		c.CachePath = defaultCachePath()
+		c.CachePath = DefaultCachePath()
 	}
 	if c.TimeoutSeconds <= 0 {
 		c.TimeoutSeconds = DefaultTimeoutSeconds
@@ -45,10 +45,6 @@ func (c *AppConfig) Normalize() {
 	if c.MaxLookbackDays <= 0 {
 		c.MaxLookbackDays = DefaultMaxLookback
 	}
-}
-
-func defaultCachePath() string {
-	return DefaultCachePath()
 }
 
 func DefaultCachePath() string {
