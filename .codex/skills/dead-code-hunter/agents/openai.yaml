@@ -1,0 +1,13 @@
+# agents/openai.yaml — Codex UI metadata for dead-code-hunter
+
+display_name: Dead Code Hunter
+icon: 🧹
+
+allow_implicit_invocation: true
+
+hint: >
+  Systematically removes dead code — one unit per iteration,
+  verified by build/tests before every commit.
+
+tools:
+  - shell   # cppcheck, clang-tidy, go vet, staticcheck, git

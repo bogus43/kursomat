@@ -1,0 +1,82 @@
+# .iterdev.yml — iterative-dev-loop configuration
+# Remove options you don't need. Missing parameters fall back to defaults.
+# Resolution order: CLI flags > this file > defaults
+
+# ── Number of iterations to run ───────────────────────────────────────────────
+iterations: 10                    # (int) default: 10
+
+# ── Allowed commit types ──────────────────────────────────────────────────────
+allowed_types:                    # (list) default: [fix]
+  - fix                           # Bug fix, no new features
+  - feat                          # New feature or capability
+  - refactor                      # Code restructure, no behavior change
+  - docs                          # Documentation only
+  - test                          # Tests only
+  - perf                          # Performance improvement
+  - security                      # Security fix or hardening
+  - chore                         # Maintenance, tooling, non-code
+  - build                         # Build system changes (Makefile, CMake, go.mod)
+  - ci                            # CI/CD pipeline changes (GitHub Actions, Jenkinsfile)
+  - style                         # Formatting, whitespace — only type for format-only commits
+
+# ── Verification after each iteration ────────────────────────────────────────
+validation: compile               # (compile | test) default: compile
+                                  # compile = zero build errors
+                                  # test    = run full test suite
+
+# ── Change limits per iteration ───────────────────────────────────────────────
+max_files_changed: 8              # (int) default: 8   — hard limit on files
+max_lines_changed: 250            # (int) default: 250 — hard limit on lines (added + removed)
+
+# ── Strict mode ───────────────────────────────────────────────────────────────
+strict_mode: true                 # (true | false) default: true
+                                  # true  = medium risk → halt
+                                  # false = medium risk → warning, continue
+
+# ── Minor refactor allowed in fix iterations ──────────────────────────────────
+allow_minor_refactor_in_fix: false  # (true | false) default: false
+                                    # true  = trivial incidental cleanup allowed
+                                    # false = zero unrelated changes
+
+# ── Full test pass required ───────────────────────────────────────────────────
+require_full_test_pass: true      # (true | false) default: true
+                                  # true  = 100% of tests must pass
+                                  # false = no regressions allowed (new failures forbidden)
+
+# ── Stop on consecutive failures ──────────────────────────────────────────────
+stop_on_consecutive_fails: 2      # (int) default: 2 — number of consecutive fails before halt
+
+# ── Output format ─────────────────────────────────────────────────────────────
+output_format: human              # (human | compact | json) default: human
+                                  # human   = full structured block per iteration
+                                  # compact = one line per iteration (for scripting)
+                                  # json    = JSON object per iteration (for parsing)
+
+# ── Log file ──────────────────────────────────────────────────────────────────
+log_file: .iterdev.log            # (string) default: .iterdev.log
+                                  # Always human format, append mode
+                                  # Disable: log_file: ""
+
+# ── Interactive mode (wizard) ─────────────────────────────────────────────────
+interactive: false                # (true | false) default: false
+                                  # false = start immediately, no prompts
+                                  # true  = wizard for missing parameters
+
+# ── Forbidden paths / modules ─────────────────────────────────────────────────
+forbidden:                        # (list) default: [deps]
+  - deps                          # Project dependencies
+  - vendor                        # Vendor directory
+  # - third_party                 # Example: custom third-party directory
+  # - generated                   # Example: auto-generated files
+
+# ── Commit rules (always active — change only if you have a reason) ───────────
+no_empty_commits: true            # (true | false) default: true  — no empty commits allowed
+no_unrelated_changes: true        # (true | false) default: true  — no changes outside scope
+one_logical_change_per_commit: true  # (true | false) default: true
+
+# ── Push rules ────────────────────────────────────────────────────────────────
+push_after_commit: true           # (true | false) default: true  — git push after every commit
+                                  # Iteration is NOT complete until push returns exit code 0
+push_failure_action: halt         # (halt | retry) default: halt
+                                  # halt  = stop execution, report push error
+                                  # retry = retry push once before halting

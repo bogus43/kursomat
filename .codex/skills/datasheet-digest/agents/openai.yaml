@@ -1,0 +1,13 @@
+# agents/openai.yaml — Codex UI metadata for datasheet-digest
+
+display_name: Datasheet Digest
+icon: 📄
+
+allow_implicit_invocation: true
+
+hint: >
+  Extract only what matters from a hardware datasheet PDF —
+  generates a concise device.digest.md reference file.
+
+tools:
+  - shell   # file write

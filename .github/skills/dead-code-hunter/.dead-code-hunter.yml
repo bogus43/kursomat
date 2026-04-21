@@ -1,0 +1,39 @@
+# .dead-code-hunter.yml — dead-code-hunter configuration
+# All parameters optional. Missing values fall back to defaults.
+# Resolution order: inline context → this file → defaults
+
+# ── Scope ─────────────────────────────────────────────────────────────────────
+# scope: ""               # (string) default: "" = entire repo
+                          # Examples:
+                          # scope: "src/hal/"
+                          # scope: "lib/i2c/"
+
+# ── Certainty level ───────────────────────────────────────────────────────────
+certainty: safe           # (safe | all) default: safe
+                          # safe = unused functions, variables, imports, unreachable, commented blocks
+                          # all  = + unused public API, feature-flag code (requires manual review)
+
+# ── Verification ──────────────────────────────────────────────────────────────
+validation: compile       # (compile | test) default: compile
+
+# ── Granularity ───────────────────────────────────────────────────────────────
+max_removals_per_iter: 1  # (int) default: 1 — units removed per iteration
+commented_code_min_lines: 3  # (int) default: 3 — min lines to qualify commented block
+
+# ── Stop condition ────────────────────────────────────────────────────────────
+stop_on_consecutive_fails: 2  # (int) default: 2
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_format: human      # (human | compact | json) default: human
+log_file: .dead-code-hunter.log  # default: .dead-code-hunter.log; "" to disable
+
+# ── Push ──────────────────────────────────────────────────────────────────────
+push_after_commit: true       # (true | false) default: true
+push_failure_action: halt     # (halt | retry) default: halt
+
+# ── Forbidden ─────────────────────────────────────────────────────────────────
+forbidden:                # default: [deps, vendor, generated]
+  - deps
+  - vendor
+  - generated
+  # - third_party

@@ -1,0 +1,19 @@
+# .changelog.yml — changelog-generator configuration
+
+from: auto        # (string) default: auto = last git tag
+                  # Examples: from: "v1.2.0"  from: "abc1234"
+
+to: HEAD          # (string) default: HEAD
+
+version: auto     # (string) default: auto = semver suggestion
+                  # Example: version: "2.0.0"
+
+dry_run: true     # (true|false) default: true
+                  # true  = print only, no file write
+                  # false = write/prepend to CHANGELOG.md
+
+append: true      # (true|false) default: true
+                  # true  = prepend new entry to existing CHANGELOG.md
+                  # false = overwrite entire file
+
+lang: en          # (en|pl) default: en

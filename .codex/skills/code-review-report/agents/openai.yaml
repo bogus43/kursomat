@@ -1,0 +1,13 @@
+# agents/openai.yaml — Codex UI metadata for code-review-report
+
+display_name: Code Review Report
+icon: 🔍
+
+allow_implicit_invocation: true
+
+hint: >
+  Read-only code analysis — generates a structured review report
+  with findings, severity, suggested fixes, and merge verdict.
+
+tools:
+  - shell   # git diff, git log (read-only)

@@ -1,0 +1,11 @@
+display_name: Hardware Interface Doc
+icon: 🔌
+
+allow_implicit_invocation: true
+
+hint: >
+  Generates hardware interface documentation from source code —
+  register map, protocol, commands, init sequence. Read-only.
+
+tools:
+  - shell   # file read (read-only)

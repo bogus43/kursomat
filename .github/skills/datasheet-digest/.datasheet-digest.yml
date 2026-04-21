@@ -1,0 +1,21 @@
+# .datasheet-digest.yml — datasheet-digest configuration
+# All parameters are optional. Missing values fall back to defaults.
+
+# ── What to extract ───────────────────────────────────────────────────────────
+focus: ""                   # (string) default: "" = model auto-detects primary interface
+                            # Examples:
+                            # focus: "I2C communication only"
+                            # focus: "power supply and voltage levels"
+                            # focus: "register map for measurement modes"
+
+# ── Output language ───────────────────────────────────────────────────────────
+lang: en                    # (en | pl) default: en
+
+# ── Output file name ──────────────────────────────────────────────────────────
+output_file: ""             # (string) default: derived from device name in PDF
+                            # Example: output_file: "mcp2221a.digest.md"
+
+# ── Append mode ───────────────────────────────────────────────────────────────
+append: false               # (true | false) default: false
+                            # true  = append to existing digest file
+                            # false = overwrite

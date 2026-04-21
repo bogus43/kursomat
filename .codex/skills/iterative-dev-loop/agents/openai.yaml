@@ -1,0 +1,19 @@
+# agents/openai.yaml — Codex UI metadata for iterative-dev-loop skill
+# https://developers.openai.com/codex/skills/
+
+display_name: Iterative Dev Loop
+icon: 🔁
+
+# When false, Codex won't auto-invoke based on prompt matching.
+# User must explicitly call $iterative-dev-loop.
+# Recommended: true (let Codex match automatically)
+allow_implicit_invocation: true
+
+# Short hint shown in Codex skill picker UI
+hint: >
+  Run N disciplined dev iterations — each with analysis, plan,
+  implementation, verification, and git commit + push.
+
+# Tool dependencies Codex should expect to be available
+tools:
+  - shell  # git, make, compiler

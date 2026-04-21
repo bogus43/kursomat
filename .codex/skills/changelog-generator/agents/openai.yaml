@@ -1,0 +1,11 @@
+display_name: Changelog Generator
+icon: 📋
+
+allow_implicit_invocation: true
+
+hint: >
+  Generates CHANGELOG.md from git history — no external tools,
+  Keep a Changelog format, semver bump suggestion.
+
+tools:
+  - shell   # git log, git describe

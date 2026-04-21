@@ -1,0 +1,11 @@
+display_name: Test Coverage Push
+icon: 🧪
+
+allow_implicit_invocation: true
+
+hint: >
+  Increases test coverage iteratively — one function per iteration,
+  verified by coverage gain before every commit.
+
+tools:
+  - shell   # lcov, gcov, go test, git

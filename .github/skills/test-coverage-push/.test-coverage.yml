@@ -1,0 +1,15 @@
+# .test-coverage.yml — test-coverage-push configuration
+
+iterations: 10
+target_coverage: 80       # (int) stop when reached; 0 = run all iterations
+# scope: ""               # empty = whole repo; e.g. "src/i2c/"
+framework: auto           # auto | gtest | catch2 | unity | go-test
+min_coverage_gain: 0.1    # minimum % gain required to commit
+output_format: human      # human | compact | json
+log_file: .coverage-push.log
+push_after_commit: true
+push_failure_action: halt # halt | retry
+forbidden:
+  - deps
+  - vendor
+  - generated

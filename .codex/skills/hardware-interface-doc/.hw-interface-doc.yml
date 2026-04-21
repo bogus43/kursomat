@@ -1,0 +1,17 @@
+# .hw-interface-doc.yml — hardware-interface-doc configuration
+
+# target: ""              # empty = model detects automatically
+                          # Examples:
+                          # target: "src/i2c/mcp2221.c"
+                          # target: "src/hal/"
+
+interface: auto           # auto | i2c | spi | uart | gpio | can
+
+output_file: ""           # empty = derived from module/file name
+                          # Example: output_file: "mcp2221a.interface.md"
+
+include_examples: true    # true = include usage examples from existing code
+
+include_gotchas: false    # true = include gotchas from TODO/FIXME/HACK comments
+
+lang: en                  # en | pl

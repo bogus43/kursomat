@@ -1,0 +1,38 @@
+# .code-review.yml — code-review-report configuration
+# All parameters optional. Missing values fall back to defaults.
+# Resolution order: inline context → this file → defaults
+
+# ── What to analyze ───────────────────────────────────────────────────────────
+target: HEAD              # (string) default: HEAD
+                          # HEAD          = last commit
+                          # branch:<name> = all commits on branch vs main
+                          # commit:<sha>  = single commit
+                          # diff:<a>..<b> = range between two refs
+
+# ── Scope filter ──────────────────────────────────────────────────────────────
+# scope: ""               # (string) default: "" = all changed files
+                          # Examples:
+                          # scope: "src/i2c/"
+                          # scope: "lib/"
+
+# ── What to check ─────────────────────────────────────────────────────────────
+checks: all               # (all | bugs,quality,debt,security) default: all
+                          # Comma-separated subset: checks: bugs,security
+
+# ── Minimum severity to include in report ─────────────────────────────────────
+severity_threshold: low   # (low | medium | high) default: low
+                          # low    = all findings
+                          # medium = medium and high only
+                          # high   = critical only
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_file: review-report.md   # (string) default: review-report.md
+output_format: markdown         # (markdown | json) default: markdown
+lang: en                        # (en | pl) default: en
+
+# ── Forbidden ─────────────────────────────────────────────────────────────────
+forbidden:                # default: [deps, vendor, generated]
+  - deps
+  - vendor
+  - generated
+  # - third_party

@@ -1,0 +1,19 @@
+# .embedded-guard.yml — embedded-dev-guard configuration
+
+target: HEAD          # HEAD | branch:<n> | commit:<sha> | diff:<a>..<b>
+# scope: ""           # empty = all changed files; e.g. "src/hal/"
+
+checks: all           # all | memory,isr,timing,portability,c-safety
+
+fail_on: high         # high   = FAIL only on HIGH violations
+                      # medium = FAIL on MEDIUM or HIGH
+                      # any    = FAIL on any violation
+
+output_file: guard-report.md
+lang: en              # en | pl
+
+forbidden:
+  - deps
+  - vendor
+  - generated
+  # - third_party

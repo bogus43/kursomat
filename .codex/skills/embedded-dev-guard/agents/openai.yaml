@@ -1,0 +1,11 @@
+display_name: Embedded Dev Guard
+icon: 🛡️
+
+allow_implicit_invocation: true
+
+hint: >
+  Static safety guard for firmware — detects dynamic allocation,
+  ISR violations, timing issues, unsafe C functions. Read-only.
+
+tools:
+  - shell   # git diff, git log (read-only)
