@@ -1,7 +1,6 @@
 package models
 
 import (
-	"os"
 	"path/filepath"
 )
 
@@ -9,6 +8,10 @@ const (
 	DefaultTimeoutSeconds = 10
 	DefaultRetryCount     = 2
 	DefaultMaxLookback    = 92
+	DefaultDataDir        = "data"
+	DefaultConfigDir      = "config"
+	DefaultCacheFileName  = "kursownik.db"
+	DefaultConfigFileName = "kursownik-nbp.json"
 )
 
 type AppConfig struct {
@@ -45,9 +48,13 @@ func (c *AppConfig) Normalize() {
 }
 
 func defaultCachePath() string {
-	cacheDir, err := os.UserCacheDir()
-	if err != nil || cacheDir == "" {
-		return filepath.Join(".", "cache", "kursownik-nbp-cache.json")
-	}
-	return filepath.Join(cacheDir, "kursownik-nbp", "cache.json")
+	return DefaultCachePath()
+}
+
+func DefaultCachePath() string {
+	return filepath.Join(".", DefaultDataDir, DefaultCacheFileName)
+}
+
+func DefaultConfigPath() string {
+	return filepath.Join(".", DefaultConfigDir, DefaultConfigFileName)
 }

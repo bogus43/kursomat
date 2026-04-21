@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,23 +19,26 @@ type fileConfig struct {
 
 func LoadConfig(configPath string) (models.AppConfig, error) {
 	cfg := models.DefaultConfig()
+	cfg.Normalize()
+
 	path := stringsTrim(configPath)
 	if path == "" {
-		path = detectDefaultConfigPath()
+		path = models.DefaultConfigPath()
 	}
-	if path == "" {
-		return cfg, nil
+
+	if err := ensureDir(filepath.Dir(path), "katalog konfiguracji"); err != nil {
+		return cfg, err
+	}
+	if err := ensureDir(filepath.Dir(cfg.CachePath), "katalog danych"); err != nil {
+		return cfg, err
+	}
+	if err := ensureConfigFile(path, cfg); err != nil {
+		return cfg, err
 	}
 
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return cfg, nil
-	}
 	if err != nil {
 		return cfg, fmt.Errorf("nie udało się odczytać pliku konfiguracyjnego: %w", err)
-	}
-	if len(data) == 0 {
-		return cfg, nil
 	}
 
 	var parsed fileConfig
@@ -58,23 +60,74 @@ func LoadConfig(configPath string) (models.AppConfig, error) {
 	}
 	cfg.Verbose = parsed.Verbose
 	cfg.Normalize()
+
+	if err := ensureDir(filepath.Dir(cfg.CachePath), "katalog danych"); err != nil {
+		return cfg, err
+	}
+	if err := ensureCacheFile(cfg.CachePath); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
-func detectDefaultConfigPath() string {
-	candidates := []string{
-		"kursownik-nbp.json",
-		filepath.Join(".", "config", "kursownik-nbp.json"),
+func ensureConfigFile(path string, cfg models.AppConfig) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
 	}
-	if cfgDir, err := os.UserConfigDir(); err == nil && cfgDir != "" {
-		candidates = append(candidates, filepath.Join(cfgDir, "kursownik-nbp", "config.json"))
+
+	payload := fileConfig{
+		CachePath:       cfg.CachePath,
+		TimeoutSeconds:  cfg.TimeoutSeconds,
+		RetryCount:      cfg.RetryCount,
+		MaxLookbackDays: cfg.MaxLookbackDays,
+		Verbose:         cfg.Verbose,
 	}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("nie udało się przygotować domyślnego pliku konfiguracyjnego: %w", err)
+	}
+	data = append(data, '\n')
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
 		}
+		return fmt.Errorf("nie udało się utworzyć pliku konfiguracyjnego: %w", err)
 	}
-	return ""
+	defer file.Close()
+
+	if _, err := file.Write(data); err != nil {
+		return fmt.Errorf("nie udało się zapisać domyślnego pliku konfiguracyjnego: %w", err)
+	}
+	return nil
+}
+
+func ensureCacheFile(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return fmt.Errorf("nie udało się utworzyć pliku cache: %w", err)
+	}
+	defer file.Close()
+
+	return nil
+}
+
+func ensureDir(path, label string) error {
+	if stringsTrim(path) == "" || path == "." {
+		return nil
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return fmt.Errorf("nie udało się utworzyć %s (%s): %w", label, path, err)
+	}
+	return nil
 }
 
 func stringsTrim(s string) string {

@@ -20,9 +20,6 @@ func TestParseCurrencies(t *testing.T) {
 		t.Fatalf("unexpected currencies: %#v", valid)
 	}
 
-	if _, err := ParseCurrencies("ABC"); err == nil {
-		t.Fatalf("expected unsupported currency error")
-	}
 	if _, err := ParseCurrencies("US"); err == nil {
 		t.Fatalf("expected invalid currency code error")
 	}
@@ -51,5 +48,20 @@ func TestParseOutputFormat(t *testing.T) {
 	}
 	if _, err := ParseOutputFormat("xml"); err == nil {
 		t.Fatalf("expected unsupported output format error")
+	}
+}
+
+func TestParseAmount(t *testing.T) {
+	t.Parallel()
+
+	got, err := ParseAmount("123,45")
+	if err != nil {
+		t.Fatalf("expected valid amount, got error: %v", err)
+	}
+	if got != 123.45 {
+		t.Fatalf("expected 123.45, got %v", got)
+	}
+	if _, err := ParseAmount("-1"); err == nil {
+		t.Fatalf("expected negative amount error")
 	}
 }

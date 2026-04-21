@@ -123,6 +123,7 @@ func (a *App) runRate(args []string) int {
 		a.printError(err)
 		return 1
 	}
+	defer store.Close()
 	client := nbp.NewClient(nbp.ClientConfig{
 		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
 		RetryCount:      cfg.RetryCount,
@@ -200,6 +201,7 @@ func (a *App) runTUI(args []string) int {
 		a.printError(err)
 		return 1
 	}
+	defer store.Close()
 	client := nbp.NewClient(nbp.ClientConfig{
 		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
 		RetryCount:      cfg.RetryCount,
@@ -267,6 +269,7 @@ func (a *App) runCacheClear(args []string) int {
 		a.printError(err)
 		return 1
 	}
+	defer store.Close()
 	if err := store.Clear(); err != nil {
 		a.printError(err)
 		return 1
@@ -304,6 +307,7 @@ func (a *App) runCacheInfo(args []string) int {
 		a.printError(err)
 		return 1
 	}
+	defer store.Close()
 
 	info, err := store.Info()
 	if err != nil {
@@ -312,10 +316,11 @@ func (a *App) runCacheInfo(args []string) int {
 	}
 	fmt.Fprintf(
 		a.out,
-		"Ścieżka: %s\nLiczba wpisów kursów: %d\nLiczba mapowań zapytań: %d\nRozmiar pliku: %d B\nOstatni zapis: %s\n",
+		"Ścieżka: %s\nLiczba wpisów kursów: %d\nLiczba mapowań zapytań: %d\nLiczba walut: %d\nRozmiar pliku: %d B\nOstatni zapis: %s\n",
 		info.Path,
 		info.Entries,
 		info.QueryMappings,
+		info.CurrencyCount,
 		info.SizeBytes,
 		orDash(info.LastSavedAt),
 	)

@@ -18,6 +18,29 @@ func NewService(client *Client, store cache.Store) *Service {
 	return &Service{client: client, cache: store}
 }
 
+func (s *Service) GetCurrencies(ctx context.Context) ([]models.Currency, error) {
+	if s.cache != nil {
+		currencies, found, err := s.cache.GetCurrencies()
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return currencies, nil
+		}
+	}
+
+	currencies, err := s.client.GetCurrencies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		if err := s.cache.StoreCurrencies(currencies); err != nil {
+			return nil, err
+		}
+	}
+	return currencies, nil
+}
+
 func (s *Service) GetRates(ctx context.Context, currencies []string, requestedDate time.Time) ([]models.RateResult, error) {
 	results := make([]models.RateResult, 0, len(currencies))
 	for _, currency := range currencies {

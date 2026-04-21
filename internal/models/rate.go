@@ -16,6 +16,11 @@ type RateResult struct {
 	Source            string  `json:"source"`
 }
 
+type Currency struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
 type NBPRate struct {
 	Currency          string
 	EffectiveRateDate string

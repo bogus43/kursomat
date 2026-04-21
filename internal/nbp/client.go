@@ -42,10 +42,24 @@ type rateRangeResponse struct {
 	Rates    []nbpRateRow `json:"rates"`
 }
 
+type tableAResponse []nbpTable
+
+type nbpTable struct {
+	Table string         `json:"table"`
+	No    string         `json:"no"`
+	Rates []nbpTableRate `json:"rates"`
+}
+
 type nbpRateRow struct {
 	No            string  `json:"no"`
 	EffectiveDate string  `json:"effectiveDate"`
 	Mid           float64 `json:"mid"`
+}
+
+type nbpTableRate struct {
+	Currency string  `json:"currency"`
+	Code     string  `json:"code"`
+	Mid      float64 `json:"mid"`
 }
 
 func NewClient(cfg ClientConfig) *Client {
@@ -103,6 +117,27 @@ func (c *Client) GetRateOnOrBefore(ctx context.Context, currency string, request
 	return pickLatestRate(payload, strings.ToUpper(currency), requestedDate)
 }
 
+func (c *Client) GetCurrencies(ctx context.Context) ([]models.Currency, error) {
+	endpoint := fmt.Sprintf("%s/exchangerates/tables/A/?format=json", c.baseURL)
+
+	var payload tableAResponse
+	if err := c.doJSON(ctx, endpoint, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload) == 0 {
+		return nil, ErrNoData
+	}
+
+	currencies := make([]models.Currency, 0, len(payload[0].Rates))
+	for _, item := range payload[0].Rates {
+		currencies = append(currencies, models.Currency{
+			Code: item.Code,
+			Name: item.Currency,
+		})
+	}
+	return currencies, nil
+}
+
 func pickLatestRate(payload rateRangeResponse, currency string, requestedDate time.Time) (models.NBPRate, error) {
 	if len(payload.Rates) == 0 {
 		return models.NBPRate{}, ErrNoData
@@ -134,7 +169,7 @@ func parseRateRangeResponse(data []byte) (rateRangeResponse, error) {
 	return payload, nil
 }
 
-func (c *Client) doJSON(ctx context.Context, endpoint string, dst *rateRangeResponse) error {
+func (c *Client) doJSON(ctx context.Context, endpoint string, dst any) error {
 	var lastErr error
 	for attempt := 0; attempt <= c.retryCount; attempt++ {
 		if attempt > 0 {
@@ -172,11 +207,9 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst *rateRangeResp
 		}
 
 		if resp.StatusCode == http.StatusOK {
-			payload, err := parseRateRangeResponse(body)
-			if err != nil {
-				return err
+			if err := json.Unmarshal(body, dst); err != nil {
+				return fmt.Errorf("nie udało się odczytać odpowiedzi API: %w", err)
 			}
-			*dst = payload
 			return nil
 		}
 		if resp.StatusCode == http.StatusNotFound {

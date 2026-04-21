@@ -1,14 +1,15 @@
 package cache
 
 import (
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"kursomat/internal/models"
 )
@@ -19,6 +20,7 @@ type Info struct {
 	Path          string
 	Entries       int
 	QueryMappings int
+	CurrencyCount int
 	LastSavedAt   string
 	SizeBytes     int64
 }
@@ -26,125 +28,205 @@ type Info struct {
 type Store interface {
 	GetByQuery(currency, requestedDate string) (models.RateResult, bool, error)
 	StoreResolvedRate(currency, requestedDate string, rate models.NBPRate) error
+	GetCurrencies() ([]models.Currency, bool, error)
+	StoreCurrencies(currencies []models.Currency) error
 	Save() error
 	Clear() error
 	Info() (Info, error)
+	Close() error
 }
 
-type fileStore struct {
-	mu     sync.RWMutex
-	saveMu sync.Mutex
-	path   string
-	file   cacheFile
-}
-
-type cacheFile struct {
-	Version    int                `json:"version"`
-	SavedAt    string             `json:"saved_at,omitempty"`
-	Entries    map[string]rateRow `json:"entries"`
-	QueryIndex map[string]string  `json:"query_index"`
-}
-
-type rateRow struct {
-	Currency          string  `json:"currency"`
-	EffectiveRateDate string  `json:"effective_rate_date"`
-	Mid               float64 `json:"mid"`
-	TableNo           string  `json:"table_no,omitempty"`
+type sqliteStore struct {
+	path string
+	db   *sql.DB
 }
 
 func NewFileStore(path string) (Store, error) {
-	store := &fileStore{
-		path: path,
-		file: cacheFile{
-			Version:    1,
-			Entries:    map[string]rateRow{},
-			QueryIndex: map[string]string{},
-		},
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("nie udało się utworzyć katalogu danych: %w", err)
 	}
-	if err := store.load(); err != nil {
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, normalizeDBError(fmt.Errorf("nie udało się otworzyć bazy cache: %w", err))
+	}
+
+	store := &sqliteStore{
+		path: path,
+		db:   db,
+	}
+	if err := store.initSchema(); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	return store, nil
 }
 
-func (s *fileStore) GetByQuery(currency, requestedDate string) (models.RateResult, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *sqliteStore) GetByQuery(currency, requestedDate string) (models.RateResult, bool, error) {
+	const query = `
+SELECT r.currency_code, qc.requested_date, r.effective_rate_date, r.mid, COALESCE(r.table_no, '')
+FROM query_cache qc
+JOIN rates r
+  ON r.currency_code = qc.currency_code
+ AND r.effective_rate_date = qc.effective_rate_date
+WHERE qc.currency_code = ? AND qc.requested_date = ?`
 
-	requestedKey := makeQueryKey(currency, requestedDate)
-	entryKey, ok := s.file.QueryIndex[requestedKey]
-	if !ok {
+	var result models.RateResult
+	err := s.db.QueryRow(query, strings.ToUpper(currency), requestedDate).Scan(
+		&result.Currency,
+		&result.RequestedDate,
+		&result.EffectiveRateDate,
+		&result.Mid,
+		&result.TableNo,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
 		return models.RateResult{}, false, nil
 	}
-	row, ok := s.file.Entries[entryKey]
-	if !ok {
-		return models.RateResult{}, false, nil
-	}
-
-	return models.RateResult{
-		Currency:          row.Currency,
-		RequestedDate:     requestedDate,
-		EffectiveRateDate: row.EffectiveRateDate,
-		Mid:               row.Mid,
-		TableNo:           row.TableNo,
-		Source:            "cache",
-	}, true, nil
-}
-
-func (s *fileStore) StoreResolvedRate(currency, requestedDate string, rate models.NBPRate) error {
-	effectiveKey := makeRateKey(currency, rate.EffectiveRateDate)
-	queryKey := makeQueryKey(currency, requestedDate)
-
-	s.mu.Lock()
-	s.file.Entries[effectiveKey] = rateRow{
-		Currency:          strings.ToUpper(currency),
-		EffectiveRateDate: rate.EffectiveRateDate,
-		Mid:               rate.Mid,
-		TableNo:           rate.TableNo,
-	}
-	s.file.QueryIndex[queryKey] = effectiveKey
-	s.file.SavedAt = time.Now().Format(time.RFC3339)
-	s.mu.Unlock()
-
-	return s.Save()
-}
-
-func (s *fileStore) Save() error {
-	snapshot, err := s.snapshot()
 	if err != nil {
-		return err
+		return models.RateResult{}, false, normalizeDBError(fmt.Errorf("nie udało się odczytać kursu z bazy cache: %w", err))
 	}
-	data, err := json.MarshalIndent(snapshot, "", "  ")
+	result.Source = "cache"
+	return result, true, nil
+}
+
+func (s *sqliteStore) StoreResolvedRate(currency, requestedDate string, rate models.NBPRate) error {
+	tx, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("nie udało się zapisać cache: %w", err)
+		return normalizeDBError(fmt.Errorf("nie udało się rozpocząć zapisu do bazy cache: %w", err))
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	timestamp := time.Now().Format(time.RFC3339)
+	currency = strings.ToUpper(currency)
+
+	if _, err = tx.Exec(`
+INSERT INTO rates(currency_code, effective_rate_date, mid, table_no, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(currency_code, effective_rate_date) DO UPDATE SET
+  mid = excluded.mid,
+  table_no = excluded.table_no,
+  updated_at = excluded.updated_at`,
+		currency,
+		rate.EffectiveRateDate,
+		rate.Mid,
+		rate.TableNo,
+		timestamp,
+	); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się zapisać kursu do bazy cache: %w", err))
 	}
 
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-	return writeDataAtomic(s.path, data)
+	if _, err = tx.Exec(`
+INSERT INTO query_cache(currency_code, requested_date, effective_rate_date, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(currency_code, requested_date) DO UPDATE SET
+  effective_rate_date = excluded.effective_rate_date,
+  updated_at = excluded.updated_at`,
+		currency,
+		requestedDate,
+		rate.EffectiveRateDate,
+		timestamp,
+	); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się zapisać mapowania zapytania do bazy cache: %w", err))
+	}
+
+	if err = tx.Commit(); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się zatwierdzić zapisu do bazy cache: %w", err))
+	}
+	return nil
 }
 
-func (s *fileStore) Clear() error {
-	s.mu.Lock()
-	s.file = cacheFile{
-		Version:    1,
-		SavedAt:    time.Now().Format(time.RFC3339),
-		Entries:    map[string]rateRow{},
-		QueryIndex: map[string]string{},
+func (s *sqliteStore) GetCurrencies() ([]models.Currency, bool, error) {
+	rows, err := s.db.Query(`SELECT code, name FROM currencies ORDER BY code`)
+	if err != nil {
+		return nil, false, normalizeDBError(fmt.Errorf("nie udało się odczytać listy walut z bazy cache: %w", err))
 	}
-	s.mu.Unlock()
-	return s.Save()
+	defer rows.Close()
+
+	currencies := make([]models.Currency, 0, 32)
+	for rows.Next() {
+		var currency models.Currency
+		if err := rows.Scan(&currency.Code, &currency.Name); err != nil {
+			return nil, false, normalizeDBError(fmt.Errorf("nie udało się odczytać rekordu waluty z bazy cache: %w", err))
+		}
+		currencies = append(currencies, currency)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, normalizeDBError(fmt.Errorf("nie udało się zakończyć odczytu listy walut z bazy cache: %w", err))
+	}
+	return currencies, len(currencies) > 0, nil
 }
 
-func (s *fileStore) Info() (Info, error) {
-	s.mu.RLock()
-	info := Info{
-		Path:          s.path,
-		Entries:       len(s.file.Entries),
-		QueryMappings: len(s.file.QueryIndex),
-		LastSavedAt:   s.file.SavedAt,
+func (s *sqliteStore) StoreCurrencies(currencies []models.Currency) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się rozpocząć zapisu listy walut do bazy cache: %w", err))
 	}
-	s.mu.RUnlock()
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	timestamp := time.Now().Format(time.RFC3339)
+	for _, currency := range currencies {
+		if _, err = tx.Exec(`
+INSERT INTO currencies(code, name, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(code) DO UPDATE SET
+  name = excluded.name,
+  updated_at = excluded.updated_at`,
+			strings.ToUpper(currency.Code),
+			currency.Name,
+			timestamp,
+		); err != nil {
+			return normalizeDBError(fmt.Errorf("nie udało się zapisać waluty %s do bazy cache: %w", currency.Code, err))
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się zatwierdzić zapisu listy walut do bazy cache: %w", err))
+	}
+	return nil
+}
+
+func (s *sqliteStore) Save() error {
+	return nil
+}
+
+func (s *sqliteStore) Clear() error {
+	if _, err := s.db.Exec(`DELETE FROM query_cache; DELETE FROM rates; DELETE FROM currencies;`); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się wyczyścić bazy cache: %w", err))
+	}
+	return nil
+}
+
+func (s *sqliteStore) Info() (Info, error) {
+	info := Info{Path: s.path}
+
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rates`).Scan(&info.Entries); err != nil {
+		return Info{}, normalizeDBError(fmt.Errorf("nie udało się odczytać liczby kursów z bazy cache: %w", err))
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM query_cache`).Scan(&info.QueryMappings); err != nil {
+		return Info{}, normalizeDBError(fmt.Errorf("nie udało się odczytać liczby mapowań z bazy cache: %w", err))
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM currencies`).Scan(&info.CurrencyCount); err != nil {
+		return Info{}, normalizeDBError(fmt.Errorf("nie udało się odczytać liczby walut z bazy cache: %w", err))
+	}
+	if err := s.db.QueryRow(`
+SELECT COALESCE(MAX(ts), '')
+FROM (
+  SELECT MAX(updated_at) AS ts FROM rates
+  UNION ALL
+  SELECT MAX(updated_at) AS ts FROM query_cache
+  UNION ALL
+  SELECT MAX(updated_at) AS ts FROM currencies
+)`).Scan(&info.LastSavedAt); err != nil {
+		return Info{}, normalizeDBError(fmt.Errorf("nie udało się odczytać czasu ostatniego zapisu z bazy cache: %w", err))
+	}
 
 	stat, err := os.Stat(s.path)
 	if err == nil {
@@ -153,85 +235,50 @@ func (s *fileStore) Info() (Info, error) {
 	return info, nil
 }
 
-func (s *fileStore) load() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("nie udało się utworzyć katalogu cache: %w", err)
-	}
-
-	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
+func (s *sqliteStore) Close() error {
+	if s == nil || s.db == nil {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("nie udało się odczytać cache: %w", err)
+	return s.db.Close()
+}
+
+func (s *sqliteStore) initSchema() error {
+	const schema = `
+PRAGMA busy_timeout = 5000;
+PRAGMA journal_mode = WAL;
+CREATE TABLE IF NOT EXISTS rates (
+  currency_code TEXT NOT NULL,
+  effective_rate_date TEXT NOT NULL,
+  mid REAL NOT NULL,
+  table_no TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(currency_code, effective_rate_date)
+);
+CREATE TABLE IF NOT EXISTS query_cache (
+  currency_code TEXT NOT NULL,
+  requested_date TEXT NOT NULL,
+  effective_rate_date TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(currency_code, requested_date)
+);
+CREATE TABLE IF NOT EXISTS currencies (
+  code TEXT NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);`
+
+	if _, err := s.db.Exec(schema); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się przygotować struktury bazy cache: %w", err))
 	}
-	if len(data) == 0 {
+	return nil
+}
+
+func normalizeDBError(err error) error {
+	if err == nil {
 		return nil
 	}
-
-	var parsed cacheFile
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	if strings.Contains(strings.ToLower(err.Error()), "not a database") {
 		return fmt.Errorf("%w: %v", ErrCorruptedCache, err)
 	}
-	if parsed.Entries == nil {
-		parsed.Entries = map[string]rateRow{}
-	}
-	if parsed.QueryIndex == nil {
-		parsed.QueryIndex = map[string]string{}
-	}
-	if parsed.Version == 0 {
-		parsed.Version = 1
-	}
-
-	s.mu.Lock()
-	s.file = parsed
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *fileStore) snapshot() (cacheFile, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return cacheFile{
-		Version:    s.file.Version,
-		SavedAt:    s.file.SavedAt,
-		Entries:    cloneEntries(s.file.Entries),
-		QueryIndex: cloneIndex(s.file.QueryIndex),
-	}, nil
-}
-
-func cloneEntries(in map[string]rateRow) map[string]rateRow {
-	out := make(map[string]rateRow, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-func cloneIndex(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-func writeDataAtomic(path string, data []byte) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return fmt.Errorf("nie udało się zapisać pliku tymczasowego cache: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("nie udało się podmienić pliku cache: %w", err)
-	}
-	return nil
-}
-
-func makeRateKey(currency, effectiveDate string) string {
-	return strings.ToUpper(currency) + "|" + effectiveDate
-}
-
-func makeQueryKey(currency, requestedDate string) string {
-	return strings.ToUpper(currency) + "|" + requestedDate
+	return err
 }

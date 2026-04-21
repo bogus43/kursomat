@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 	"regexp"
-	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,16 +11,7 @@ import (
 )
 
 var (
-	currencyPattern     = regexp.MustCompile(`^[A-Z]{3}$`)
-	supportedCurrencies = map[string]struct{}{
-		"USD": {},
-		"EUR": {},
-		"GBP": {},
-		"CHF": {},
-		"NOK": {},
-		"SEK": {},
-		"CZK": {},
-	}
+	currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
 )
 
 func ParseDate(raw string) (time.Time, error) {
@@ -44,13 +35,6 @@ func ParseCurrencies(raw string) ([]string, error) {
 		if !currencyPattern.MatchString(code) {
 			return nil, fmt.Errorf("niepoprawny kod waluty: %s", code)
 		}
-		if _, ok := supportedCurrencies[code]; !ok {
-			return nil, fmt.Errorf(
-				"nieobsługiwany kod waluty: %s (obsługiwane: %s)",
-				code,
-				strings.Join(sortedSupportedCurrencies(), ","),
-			)
-		}
 		if _, exists := seen[code]; exists {
 			continue
 		}
@@ -63,6 +47,21 @@ func ParseCurrencies(raw string) ([]string, error) {
 	return unique, nil
 }
 
+func ParseAmount(raw string) (float64, error) {
+	normalized := strings.TrimSpace(strings.ReplaceAll(raw, ",", "."))
+	if normalized == "" {
+		return 0, fmt.Errorf("podaj kwotę do przeliczenia")
+	}
+	amount, err := strconv.ParseFloat(normalized, 64)
+	if err != nil {
+		return 0, fmt.Errorf("niepoprawna kwota: %s", raw)
+	}
+	if amount < 0 {
+		return 0, fmt.Errorf("kwota nie może być ujemna")
+	}
+	return amount, nil
+}
+
 func ParseOutputFormat(raw string) (models.OutputFormat, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(models.OutputText):
@@ -72,13 +71,4 @@ func ParseOutputFormat(raw string) (models.OutputFormat, error) {
 	default:
 		return "", fmt.Errorf("nieobsługiwany format wyjścia: %s (dozwolone: text, json)", raw)
 	}
-}
-
-func sortedSupportedCurrencies() []string {
-	list := make([]string, 0, len(supportedCurrencies))
-	for code := range supportedCurrencies {
-		list = append(list, code)
-	}
-	slices.Sort(list)
-	return list
 }
