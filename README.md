@@ -2,6 +2,10 @@
 
 `Kursownik NBP` to aplikacja CLI w Go do pobierania średnich kursów walut z oficjalnego API NBP (tabela A), z lokalnym cache JSON.
 
+Aplikacja oferuje:
+- klasyczne komendy CLI (`rate`, `cache`),
+- interfejs TUI (pełnoekranowy terminal UI) uruchamiany komendą `tui` lub domyślnie bez argumentów.
+
 ## Funkcje MVP
 
 - pobieranie kursu dla pojedynczej waluty i daty,
@@ -35,6 +39,14 @@ go build -o kursownik-nbp ./cmd/kursownik-nbp
 
 ## Użycie
 
+### Start TUI (domyślny)
+
+```bash
+./kursownik-nbp
+# lub
+./kursownik-nbp tui
+```
+
 ### Pobranie jednego kursu
 
 ```bash
@@ -59,6 +71,15 @@ go build -o kursownik-nbp ./cmd/kursownik-nbp
 ./kursownik-nbp cache info
 ./kursownik-nbp cache clear
 ```
+
+### Skróty TUI
+
+- `←/→` przełączanie zakładek (`Kursy` / `Cache`)
+- `Tab` / `Shift+Tab` zmiana fokusu
+- `Enter` akcja główna
+- `r` odśwież informacje o cache (w zakładce cache)
+- `c` wyczyść cache (w zakładce cache)
+- `q` lub `Ctrl+C` wyjście
 
 ## Konfiguracja
 
@@ -132,4 +153,3 @@ Zakres testów:
 - parser odpowiedzi API i logika wyboru daty (`internal/nbp`),
 - cache (`internal/cache`),
 - integracyjny test klienta NBP z `httptest`.
-

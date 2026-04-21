@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"kursomat/internal/cache"
 	"kursomat/internal/models"
 	"kursomat/internal/nbp"
@@ -25,11 +27,12 @@ func NewApp(out, err io.Writer) *App {
 
 func (a *App) Run(args []string) int {
 	if len(args) == 0 {
-		a.printRootUsage()
-		return 1
+		return a.runTUI(nil)
 	}
 
 	switch args[0] {
+	case "tui":
+		return a.runTUI(args[1:])
 	case "rate":
 		return a.runRate(args[1:])
 	case "cache":
@@ -71,6 +74,9 @@ func (a *App) runRate(args []string) int {
 	fs.BoolVar(&verbose, "verbose", false, "Włącz dodatkowe logi diagnostyczne")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 
@@ -140,6 +146,77 @@ func (a *App) runRate(args []string) int {
 	return 0
 }
 
+func (a *App) runTUI(args []string) int {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+
+	var (
+		configPath     string
+		cachePath      string
+		timeoutSeconds int
+		retryCount     int
+		lookbackDays   int
+		verbose        bool
+	)
+
+	fs.StringVar(&configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
+	fs.StringVar(&cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
+	fs.IntVar(&timeoutSeconds, "timeout", -1, "Timeout żądania HTTP w sekundach")
+	fs.IntVar(&retryCount, "retry", -1, "Liczba retry dla błędów sieciowych")
+	fs.IntVar(&lookbackDays, "lookback-days", -1, "Maksymalny zakres cofnięcia daty przy szukaniu kursu")
+	fs.BoolVar(&verbose, "verbose", false, "Włącz dodatkowe logi diagnostyczne")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		a.printError(err)
+		return 1
+	}
+	if cachePath != "" {
+		cfg.CachePath = cachePath
+	}
+	if timeoutSeconds > 0 {
+		cfg.TimeoutSeconds = timeoutSeconds
+	}
+	if retryCount >= 0 {
+		cfg.RetryCount = retryCount
+	}
+	if lookbackDays > 0 {
+		cfg.MaxLookbackDays = lookbackDays
+	}
+	if verbose {
+		cfg.Verbose = true
+	}
+	cfg.Normalize()
+
+	store, err := cache.NewFileStore(cfg.CachePath)
+	if err != nil {
+		a.printError(err)
+		return 1
+	}
+	client := nbp.NewClient(nbp.ClientConfig{
+		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
+		RetryCount:      cfg.RetryCount,
+		MaxLookbackDays: cfg.MaxLookbackDays,
+		Verbose:         cfg.Verbose,
+	})
+	service := nbp.NewService(client, store)
+
+	model := newTUIModel(cfg, service, store)
+	program := tea.NewProgram(model)
+	if _, err := program.Run(); err != nil {
+		a.printError(err)
+		return 1
+	}
+	return 0
+}
+
 func (a *App) runCache(args []string) int {
 	if len(args) == 0 {
 		a.printCacheUsage()
@@ -169,6 +246,9 @@ func (a *App) runCacheClear(args []string) int {
 	fs.StringVar(&configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
 	fs.StringVar(&cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 
@@ -203,6 +283,9 @@ func (a *App) runCacheInfo(args []string) int {
 	fs.StringVar(&configPath, "config", "", "Ścieżka do pliku konfiguracyjnego JSON")
 	fs.StringVar(&cachePath, "cache-path", "", "Nadpisanie ścieżki cache")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 
@@ -243,6 +326,7 @@ func (a *App) printRootUsage() {
 	fmt.Fprintln(a.out, "Kursownik NBP")
 	fmt.Fprintln(a.out, "")
 	fmt.Fprintln(a.out, "Użycie:")
+	fmt.Fprintln(a.out, "  kursownik-nbp tui")
 	fmt.Fprintln(a.out, "  kursownik-nbp rate --currency USD --date 2026-04-14")
 	fmt.Fprintln(a.out, "  kursownik-nbp rate --currency USD,EUR,CHF --date 2026-04-14 --output json")
 	fmt.Fprintln(a.out, "  kursownik-nbp cache clear")
