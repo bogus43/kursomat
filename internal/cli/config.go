@@ -11,11 +11,13 @@ import (
 )
 
 type fileConfig struct {
-	CachePath       string `json:"cache_path"`
-	TimeoutSeconds  int    `json:"timeout_seconds"`
-	RetryCount      int    `json:"retry_count"`
-	MaxLookbackDays int    `json:"max_lookback_days"`
-	Verbose         bool   `json:"verbose"`
+	CachePath         string `json:"cache_path"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
+	RetryCount        int    `json:"retry_count"`
+	MaxLookbackDays   int    `json:"max_lookback_days"`
+	Verbose           bool   `json:"verbose"`
+	LastFromDate      string `json:"last_from_date"`
+	LastConverterDate string `json:"last_converter_date"`
 }
 
 func LoadConfig(configPath string) (models.AppConfig, error) {
@@ -60,6 +62,8 @@ func LoadConfig(configPath string) (models.AppConfig, error) {
 		cfg.MaxLookbackDays = parsed.MaxLookbackDays
 	}
 	cfg.Verbose = parsed.Verbose
+	cfg.LastFromDate = parsed.LastFromDate
+	cfg.LastConverterDate = parsed.LastConverterDate
 	cfg.Normalize()
 
 	if err := ensureDir(filepath.Dir(cfg.CachePath), "katalog danych"); err != nil {
@@ -69,6 +73,30 @@ func LoadConfig(configPath string) (models.AppConfig, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func SaveConfig(cfg models.AppConfig) error {
+	path := models.DefaultConfigPath()
+	payload := fileConfig{
+		CachePath:         cfg.CachePath,
+		TimeoutSeconds:    cfg.TimeoutSeconds,
+		RetryCount:        cfg.RetryCount,
+		MaxLookbackDays:   cfg.MaxLookbackDays,
+		Verbose:           cfg.Verbose,
+		LastFromDate:      cfg.LastFromDate,
+		LastConverterDate: cfg.LastConverterDate,
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("nie udało się przygotować pliku konfiguracyjnego: %w", err)
+	}
+	data = append(data, '\n')
+
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("nie udało się zapisać pliku konfiguracyjnego: %w", err)
+	}
+	return nil
 }
 
 func ensureConfigFile(path string, cfg models.AppConfig) error {

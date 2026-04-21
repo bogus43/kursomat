@@ -15,11 +15,13 @@ const (
 )
 
 type AppConfig struct {
-	CachePath       string `json:"cache_path"`
-	TimeoutSeconds  int    `json:"timeout_seconds"`
-	RetryCount      int    `json:"retry_count"`
-	MaxLookbackDays int    `json:"max_lookback_days"`
-	Verbose         bool   `json:"verbose"`
+	CachePath         string `json:"cache_path"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
+	RetryCount        int    `json:"retry_count"`
+	MaxLookbackDays   int    `json:"max_lookback_days"`
+	Verbose           bool   `json:"verbose"`
+	LastFromDate      string `json:"last_from_date"`
+	LastConverterDate string `json:"last_converter_date"`
 }
 
 func DefaultConfig() AppConfig {
