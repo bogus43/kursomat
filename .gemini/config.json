@@ -1,0 +1,7 @@
+{
+    "model": "gemini-3.1-pro-preview",
+    "temperature": 0.2,
+    "context_caching": true,
+    "max_output_tokens": 4096,
+    "planning_mode": true
+}
