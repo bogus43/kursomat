@@ -253,7 +253,7 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst any) error {
 			return fmt.Errorf("nie udało się utworzyć zapytania do API NBP: %w", err)
 		}
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", "kursownik-nbp/1.0")
+		req.Header.Set("User-Agent", "kursomat/1.0")
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = mapNetworkError(err)

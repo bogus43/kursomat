@@ -20,10 +20,12 @@ func (a *App) registerCommonPFlags(fs *pflag.FlagSet, opts *configOptions) {
 
 func (a *App) newRootCommand() *cobra.Command {
 	commonOpts := &configOptions{}
+	cobra.MousetrapHelpText = ""
 
 	root := &cobra.Command{
-		Use:           "kursownik-nbp",
-		Short:         "CLI/TUI do kursów walut NBP z lokalnym cache SQLite",
+		Use:           "kursomat",
+		Short:         "Pełnoekranowa aplikacja terminalowa do kursów walut NBP",
+		Long:          "Kursomat uruchamia domyślnie pełnoekranowy interfejs terminalowy. Dodatkowe komendy służą do szybkiego pobierania kursów i zarządzania lokalnym cache.",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -41,7 +43,7 @@ func (a *App) newRootCommand() *cobra.Command {
 
 	tuiCmd := &cobra.Command{
 		Use:   "tui",
-		Short: "Uruchom pełnoekranowy interfejs TUI",
+		Short: "Uruchom pełnoekranowy interfejs terminalowy",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runtimeCfg, err := a.prepareRuntimeConfig(*commonOpts)

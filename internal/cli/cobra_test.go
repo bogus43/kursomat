@@ -3,6 +3,8 @@ package cli
 import (
 	"io"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestNewRootCommandExposesExpectedCommandsAndFlags(t *testing.T) {
@@ -11,8 +13,8 @@ func TestNewRootCommandExposesExpectedCommandsAndFlags(t *testing.T) {
 	app := NewApp(io.Discard, io.Discard)
 	cmd := app.newRootCommand()
 
-	if cmd.Name() != "kursownik-nbp" {
-		t.Fatalf("expected root command name kursownik-nbp, got %q", cmd.Name())
+	if cmd.Name() != "kursomat" {
+		t.Fatalf("expected root command name kursomat, got %q", cmd.Name())
 	}
 
 	subcommands := map[string]bool{
@@ -35,5 +37,17 @@ func TestNewRootCommandExposesExpectedCommandsAndFlags(t *testing.T) {
 		if cmd.PersistentFlags().Lookup(flagName) == nil {
 			t.Fatalf("expected persistent flag %q to be registered", flagName)
 		}
+	}
+}
+
+func TestNewRootCommandDisablesWindowsMousetrap(t *testing.T) {
+	t.Parallel()
+
+	cobra.MousetrapHelpText = "temporary"
+	app := NewApp(io.Discard, io.Discard)
+	_ = app.newRootCommand()
+
+	if cobra.MousetrapHelpText != "" {
+		t.Fatalf("expected mousetrap help text to be disabled")
 	}
 }

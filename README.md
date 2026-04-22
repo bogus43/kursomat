@@ -1,6 +1,6 @@
-# Kursownik NBP
+# Kursomat
 
-`Kursownik NBP` to aplikacja CLI/TUI w Go do pobierania średnich kursów walut z oficjalnego API NBP (tabela A), z lokalnym cache w bazie SQLite.
+`Kursomat` to pełnoekranowa aplikacja terminalowa w Go do pobierania średnich kursów walut z oficjalnego API NBP (tabela A), z lokalnym cache w bazie SQLite.
 
 Aplikacja oferuje:
 - klasyczne komendy CLI (`rate`, `cache`),
@@ -33,7 +33,7 @@ Aplikacja oferuje:
 ## Instalacja
 
 ```bash
-go build -o kursownik-nbp ./cmd/kursownik-nbp
+go build -o kursomat ./cmd/kursomat
 ```
 
 ## Użycie
@@ -41,34 +41,34 @@ go build -o kursownik-nbp ./cmd/kursownik-nbp
 ### Start TUI (domyślny)
 
 ```bash
-./kursownik-nbp
+./kursomat
 # lub
-./kursownik-nbp tui
+./kursomat tui
 ```
 
 ### Pobranie jednego kursu
 
 ```bash
-./kursownik-nbp rate --currency USD --date 2026-04-14
+./kursomat rate --currency USD --date 2026-04-14
 ```
 
 ### Pobranie wielu kursów
 
 ```bash
-./kursownik-nbp rate --currency USD,EUR,CHF --date 2026-04-14
+./kursomat rate --currency USD,EUR,CHF --date 2026-04-14
 ```
 
 ### Wyjście JSON
 
 ```bash
-./kursownik-nbp rate --currency USD --date 2026-04-14 --output json
+./kursomat rate --currency USD --date 2026-04-14 --output json
 ```
 
 ### Cache
 
 ```bash
-./kursownik-nbp cache info
-./kursownik-nbp cache clear
+./kursomat cache info
+./kursomat cache clear
 ```
 
 ### Skróty TUI
@@ -88,7 +88,7 @@ Aplikacja ma sensowne wartości domyślne. Opcjonalnie można podać plik konfig
 
 Przy starcie aplikacja automatycznie tworzy:
 - katalog `./data` oraz plik `./data/kursownik.db`,
-- katalog `./config` oraz plik `./config/kursownik-nbp.json`.
+- katalog `./config` oraz plik `./config/kursomat.json`.
 
 Przykład:
 
@@ -137,7 +137,7 @@ Tabela: 071/A/NBP/2026
 ## Architektura
 
 ```text
-cmd/kursownik-nbp/main.go         # entrypoint CLI
+cmd/kursomat/main.go              # entrypoint CLI
 internal/cli                      # parser komend, walidacja, output, config
 internal/nbp                      # klient API NBP + retry/timeout + logika daty kursu
 internal/cache                    # cache SQLite (kursy, mapa zapytań, lista walut)

@@ -10,8 +10,8 @@ const (
 	DefaultMaxLookback    = 92
 	DefaultDataDir        = "data"
 	DefaultConfigDir      = "config"
-	DefaultCacheFileName  = "kursownik.db"
-	DefaultConfigFileName = "kursownik-nbp.json"
+	DefaultCacheFileName  = "kursomat.db"
+	DefaultConfigFileName = "kursomat.json"
 )
 
 type AppConfig struct {

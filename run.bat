@@ -8,8 +8,7 @@ if errorlevel 1 (
   exit /b %errorlevel%
 )
 
-echo [RUN] Starting kursownik-nbp...
-"%~dp0bin\kursownik-nbp.exe" %*
+echo [RUN] Starting kursomat...
+"%~dp0bin\kursomat.exe" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 exit /b %EXIT_CODE%
-
