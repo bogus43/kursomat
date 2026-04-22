@@ -99,7 +99,12 @@ type configSavedMsg struct {
 	err error
 }
 
-type currencyItem struct {
+type converterCurrencyItem struct {
+	code string
+	name string
+}
+
+type cacheCurrencyItem struct {
 	code     string
 	name     string
 	selected bool
@@ -134,7 +139,6 @@ type pickerTarget int
 
 const (
 	pickerTargetNone pickerTarget = iota
-	pickerTargetConverter
 	pickerTargetCache
 )
 
@@ -150,14 +154,21 @@ func (i dbCurrencyItem) FilterValue() string {
 	return i.stat.Code + " " + i.stat.Name
 }
 
-func (c currencyItem) Title() string {
+func (c converterCurrencyItem) Title() string {
+	return strings.ToUpper(c.code) + "  " + c.name
+}
+
+func (c converterCurrencyItem) Description() string { return c.name }
+func (c converterCurrencyItem) FilterValue() string { return c.code + " " + c.name }
+
+func (c cacheCurrencyItem) Title() string {
 	if c.selected {
 		return "[x] " + strings.ToUpper(c.code) + "  " + c.name
 	}
 	return "[ ] " + strings.ToUpper(c.code) + "  " + c.name
 }
-func (c currencyItem) Description() string { return c.name }
-func (c currencyItem) FilterValue() string { return c.code + " " + c.name }
+func (c cacheCurrencyItem) Description() string { return c.name }
+func (c cacheCurrencyItem) FilterValue() string { return c.code + " " + c.name }
 
 type tuiKeyMap struct {
 	PrevTab    key.Binding
@@ -175,8 +186,8 @@ type tuiKeyMap struct {
 
 func defaultTUIKeyMap() tuiKeyMap {
 	return tuiKeyMap{
-		PrevTab:    key.NewBinding(key.WithKeys("left", "ctrl+left"), key.WithHelp("←", "poprzednia zakładka")),
-		NextTab:    key.NewBinding(key.WithKeys("right", "ctrl+right"), key.WithHelp("→", "następna zakładka")),
+		PrevTab:    key.NewBinding(key.WithKeys("ctrl+shift+tab"), key.WithHelp("ctrl+shift+tab", "poprzednia zakładka")),
+		NextTab:    key.NewBinding(key.WithKeys("ctrl+tab"), key.WithHelp("ctrl+tab", "następna zakładka")),
 		NextFocus:  key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "następny fokus")),
 		PrevFocus:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "poprzedni fokus")),
 		Search:     key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "szukaj waluty")),
@@ -264,8 +275,8 @@ func newTUIModel(configPath string, cfg models.AppConfig, service *nbp.Service, 
 	currencyList := list.New([]list.Item{}, delegate, 32, 12)
 	currencyList.Title = "PICKER WALUT NBP"
 	currencyList.SetShowHelp(false)
-	currencyList.SetShowPagination(false)
-	currencyList.SetShowStatusBar(false)
+	currencyList.SetShowPagination(true)
+	currencyList.SetShowStatusBar(true)
 	currencyList.SetFilteringEnabled(true)
 	currencyList.SetShowFilter(true)
 	currencyList.DisableQuitKeybindings()
@@ -482,14 +493,9 @@ func (m *tuiModel) handleWindowSize(msg tea.WindowSizeMsg, backgroundCmds []tea.
 }
 
 func (m *tuiModel) handleCurrencyClicked(msg currencyClickedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
-	if msg.target == "converter-picker" {
+	if msg.target == "converter" {
 		m.focus = 0
 		m.currencyList.Select(msg.index)
-		m.currencyPickerOpen = false
-		m.currencyPickerTarget = pickerTargetNone
-		if currency, ok := m.selectedCurrency(); ok {
-			m.status = fmt.Sprintf("Wybrano walutę %s", currency.Code)
-		}
 		return m, batchCmds(backgroundCmds...)
 	}
 	if msg.target == "cache-picker" {
@@ -522,7 +528,7 @@ func (m *tuiModel) handleMouseAction(msg mouseActionMsg, backgroundCmds []tea.Cm
 		return m, batchCmds(backgroundCmds...)
 	case "prefetch-cache":
 		m.activeTab = 1
-		m.focus = 4
+		m.focus = 2
 		if !m.cacheBusy {
 			return m.startRangePrefetch()
 		}
@@ -532,12 +538,6 @@ func (m *tuiModel) handleMouseAction(msg mouseActionMsg, backgroundCmds []tea.Cm
 		m.focus = 3
 		m.currencyPickerOpen = true
 		m.currencyPickerTarget = pickerTargetCache
-		return m, batchCmds(backgroundCmds...)
-	case "open-converter-picker":
-		m.activeTab = 0
-		m.focus = 0
-		m.currencyPickerOpen = true
-		m.currencyPickerTarget = pickerTargetConverter
 		return m, batchCmds(backgroundCmds...)
 	case "close-currency-picker":
 		m.currencyPickerOpen = false
@@ -600,20 +600,43 @@ func (m *tuiModel) handleCurrenciesLoaded(msg currenciesLoadedMsg, backgroundCmd
 	}
 	m.lastError = ""
 	m.currenciesReady = true
-	m.currencies = append([]models.Currency(nil), msg.currencies...)
-	items := make([]list.Item, 0, len(msg.currencies))
+	m.currencies = prioritizeCurrencies(append([]models.Currency(nil), msg.currencies...))
+	items := make([]list.Item, 0, len(m.currencies))
 	selectedIndex := 0
-	for i, currency := range msg.currencies {
-		items = append(items, currencyItem{code: currency.Code, name: currency.Name})
+	for i, currency := range m.currencies {
+		items = append(items, converterCurrencyItem{code: currency.Code, name: currency.Name})
 		if strings.EqualFold(currency.Code, "USD") {
 			selectedIndex = i
 		}
 	}
 	cmd := m.currencyList.SetItems(items)
 	m.currencyList.Select(selectedIndex)
-	cacheCmd := m.syncCacheCurrencyList()
 	m.status = fmt.Sprintf("Załadowano %d walut NBP", len(msg.currencies))
-	return m, batchCmds(append(backgroundCmds, cmd, cacheCmd)...)
+	return m, batchCmds(append(backgroundCmds, cmd)...)
+}
+
+func prioritizeCurrencies(currencies []models.Currency) []models.Currency {
+	preferredOrder := map[string]int{
+		"USD": 0,
+		"EUR": 1,
+		"CHF": 2,
+		"GBP": 3,
+	}
+
+	sort.SliceStable(currencies, func(i, j int) bool {
+		leftRank, leftPreferred := preferredOrder[strings.ToUpper(currencies[i].Code)]
+		rightRank, rightPreferred := preferredOrder[strings.ToUpper(currencies[j].Code)]
+
+		if leftPreferred && rightPreferred {
+			return leftRank < rightRank
+		}
+		if leftPreferred != rightPreferred {
+			return leftPreferred
+		}
+		return false
+	})
+
+	return currencies
 }
 
 func (m *tuiModel) handleConvertFinished(msg convertFinishedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
@@ -868,6 +891,16 @@ func (m *tuiModel) handleDBKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.focus = (m.focus + 3) % 4
 		return m, m.focusCurrentField()
+	case "down":
+		if m.focus < 3 && m.focus != 2 {
+			m.focus++
+			return m, m.focusCurrentField()
+		}
+	case "up":
+		if m.focus > 0 && m.focus != 2 {
+			m.focus--
+			return m, m.focusCurrentField()
+		}
 	case "enter":
 		if m.focus == 1 {
 			m.dbSortMode = m.dbSortMode.next()
@@ -898,12 +931,17 @@ func (m *tuiModel) handleConverterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	case "shift+tab":
 		m.focus = (m.focus + 4) % 5
 		return m, m.focusCurrentField()
-	case "enter":
-		if m.focus == 0 {
-			m.currencyPickerOpen = true
-			m.currencyPickerTarget = pickerTargetConverter
-			return m, nil
+	case "down":
+		if m.focus > 0 && m.focus < 4 {
+			m.focus++
+			return m, m.focusCurrentField()
 		}
+	case "up":
+		if m.focus > 0 {
+			m.focus--
+			return m, m.focusCurrentField()
+		}
+	case "enter":
 		if m.focus == 4 && !m.loading {
 			return m.startConversion()
 		}
@@ -926,17 +964,23 @@ func (m *tuiModel) handleConverterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 func (m *tuiModel) handleCacheKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "tab":
-		m.focus = (m.focus + 1) % 4
+		m.focus = (m.focus + 1) % 3
 		return m, m.focusCurrentField()
 	case "shift+tab":
-		m.focus = (m.focus + 3) % 4
+		m.focus = (m.focus + 2) % 3
 		return m, m.focusCurrentField()
-	case "enter":
-		if m.focus == 2 {
-			m.currencyPickerOpen = true
-			return m, nil
+	case "down":
+		if m.focus < 2 {
+			m.focus++
+			return m, m.focusCurrentField()
 		}
-		if m.focus == 3 && !m.cacheBusy {
+	case "up":
+		if m.focus > 0 {
+			m.focus--
+			return m, m.focusCurrentField()
+		}
+	case "enter":
+		if m.focus == 2 && !m.cacheBusy {
 			return m.startRangePrefetch()
 		}
 	case "r":
@@ -954,12 +998,6 @@ func (m *tuiModel) handleCacheKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.status = "Czyszczenie bazy cache..."
 		return m, tea.Batch(clearCacheCmd(m.store), spinnerTickCmd(m.spinner))
 	}
-
-	if key.Matches(msg, m.keys.ToggleAll) {
-		m.allCacheCurrencies = !m.allCacheCurrencies
-		m.status = m.cacheSelectionStatus()
-		return m, m.syncCacheCurrencyList()
-	}
 	return m.updateCacheComponents(msg)
 }
 
@@ -971,35 +1009,6 @@ func (m *tuiModel) handleCurrencyPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.
 		m.currencyPickerOpen = false
 		m.currencyPickerTarget = pickerTargetNone
 		return m, m.focusCurrentField()
-	}
-
-	if m.currencyPickerTarget == pickerTargetConverter {
-		if m.currencyList.SettingFilter() {
-			if msg.String() == "enter" {
-				m.currencyPickerOpen = false
-				m.currencyPickerTarget = pickerTargetNone
-				if currency, ok := m.selectedCurrency(); ok {
-					m.status = fmt.Sprintf("Wybrano walutę %s", currency.Code)
-				}
-				return m, m.focusCurrentField()
-			}
-			var cmd tea.Cmd
-			m.currencyList, cmd = m.currencyList.Update(msg)
-			return m, cmd
-		}
-
-		if msg.String() == "enter" {
-			m.currencyPickerOpen = false
-			m.currencyPickerTarget = pickerTargetNone
-			if currency, ok := m.selectedCurrency(); ok {
-				m.status = fmt.Sprintf("Wybrano walutę %s", currency.Code)
-			}
-			return m, m.focusCurrentField()
-		}
-
-		var cmd tea.Cmd
-		m.currencyList, cmd = m.currencyList.Update(msg)
-		return m, cmd
 	}
 
 	if m.cacheCurrencyList.SettingFilter() {
@@ -1031,6 +1040,19 @@ func (m *tuiModel) updateConverterComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
+	if m.focus == 0 {
+		acceptFilteredSelection := false
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+			acceptFilteredSelection = keyMsg.String() == "enter" && m.currencyList.SettingFilter()
+		}
+		m.currencyList, cmd = m.currencyList.Update(msg)
+		if acceptFilteredSelection {
+			m.resetCurrencyFilterToSelection()
+		}
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
 	if m.focus == 1 {
 		before := m.plnAmountInput.Value()
 		m.plnAmountInput, cmd = m.plnAmountInput.Update(msg)
@@ -1065,6 +1087,21 @@ func (m *tuiModel) updateConverterComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 	return m, tea.Batch(cmds...)
+}
+
+func (m *tuiModel) resetCurrencyFilterToSelection() {
+	selected, ok := m.selectedCurrency()
+	m.currencyList.ResetFilter()
+	if !ok {
+		return
+	}
+
+	for i, currency := range m.currencies {
+		if strings.EqualFold(currency.Code, selected.Code) {
+			m.currencyList.Select(i)
+			return
+		}
+	}
 }
 
 func (m *tuiModel) updateCacheComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1196,15 +1233,15 @@ func (m *tuiModel) resize() {
 	bodyWidth := maxInt(m.shellInnerWidth()-2, 40)
 	bodyHeight := maxInt(m.bodyAreaHeight(), 10)
 
-	converterFormWidth, converterResultWidth, converterStacked := splitPaneWidths(bodyWidth, 34, 32)
+	converterListWidth, converterResultWidth, converterStacked := splitPaneWidths(bodyWidth, 28, 32)
 	if converterStacked {
-		converterFormWidth = bodyWidth
+		converterListWidth = bodyWidth
 		converterResultWidth = bodyWidth
 	}
-	m.currencyList.SetSize(maxInt(minInt(bodyWidth-10, 36), 18), minInt(maxInt(bodyHeight-10, 6), 10))
-	m.plnAmountInput.SetWidth(maxInt(converterFormWidth-8, 18))
-	m.foreignAmountInput.SetWidth(maxInt(converterFormWidth-8, 18))
-	m.dateInput.SetWidth(maxInt(converterFormWidth-8, 18))
+	m.currencyList.SetSize(maxInt(converterListWidth-4, 18), maxInt(bodyHeight-4, 6))
+	m.plnAmountInput.SetWidth(maxInt(converterResultWidth-8, 18))
+	m.foreignAmountInput.SetWidth(maxInt(converterResultWidth-8, 18))
+	m.dateInput.SetWidth(maxInt(converterResultWidth-8, 18))
 	m.resultsViewport.SetWidth(maxInt(converterResultWidth-6, 18))
 	m.resultsViewport.SetHeight(maxInt(bodyHeight/2-4, 6))
 
@@ -1225,14 +1262,19 @@ func (m *tuiModel) resize() {
 		dbDetailWidth = bodyWidth
 	}
 	m.dbFilterInput.SetWidth(maxInt(dbListWidth-6, 18))
-	m.dbCurrencyList.SetSize(maxInt(dbListWidth-4, 18), maxInt(bodyHeight-8, 6))
+	m.dbCurrencyList.SetSize(maxInt(dbListWidth-4, 18), maxInt(bodyHeight-12, 4))
 	m.dbViewport.SetWidth(maxInt(dbDetailWidth-6, 18))
-	m.dbViewport.SetHeight(maxInt(bodyHeight-8, 6))
+	m.dbViewport.SetHeight(maxInt(bodyHeight-5, 4))
 	m.help.SetWidth(maxInt(m.shellInnerWidth(), 24))
 }
 
 func (m tuiModel) renderHeader(innerWidth int) string {
-	return lipgloss.JoinVertical(lipgloss.Left, m.renderTitleBar(innerWidth), m.renderTabs())
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.renderTitleBar(innerWidth),
+		m.renderHeaderDivider(innerWidth),
+		m.renderTabs(),
+	)
 }
 
 func (m tuiModel) renderTitleBar(innerWidth int) string {
@@ -1251,6 +1293,13 @@ func (m tuiModel) renderTitleBar(innerWidth int) string {
 		Background(lipgloss.Color("24")).
 		Width(innerWidth).
 		Render(title + " • " + subtitle)
+}
+
+func (m tuiModel) renderHeaderDivider(innerWidth int) string {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("8")).
+		Width(innerWidth).
+		Render(strings.Repeat("─", maxInt(innerWidth, 1)))
 }
 
 func (m tuiModel) renderTabs() string {
@@ -1275,7 +1324,7 @@ func (m tuiModel) renderTabs() string {
 }
 
 func (m tuiModel) renderBody(innerWidth, innerHeight int) string {
-	if m.currencyPickerOpen {
+	if m.currencyPickerOpen && m.currencyPickerTarget == pickerTargetCache {
 		return lipgloss.Place(
 			innerWidth,
 			innerHeight,
@@ -1285,20 +1334,27 @@ func (m tuiModel) renderBody(innerWidth, innerHeight int) string {
 		)
 	}
 	if m.activeTab == 0 {
-		return lipgloss.Place(innerWidth, innerHeight, lipgloss.Left, lipgloss.Top, m.renderConverterBody(innerWidth))
+		return lipgloss.Place(innerWidth, innerHeight, lipgloss.Left, lipgloss.Top, m.renderConverterBody(innerWidth, innerHeight))
 	}
 	if m.activeTab == 2 {
-		return lipgloss.Place(innerWidth, innerHeight, lipgloss.Left, lipgloss.Top, m.renderDatabaseBody(innerWidth))
+		return lipgloss.Place(innerWidth, innerHeight, lipgloss.Left, lipgloss.Top, m.renderDatabaseBody(innerWidth, innerHeight))
 	}
 	return lipgloss.Place(innerWidth, innerHeight, lipgloss.Left, lipgloss.Top, m.renderCacheBody(innerWidth))
 }
 
-func (m tuiModel) renderConverterBody(innerWidth int) string {
-	formWidth, resultWidth, stacked := splitPaneWidths(innerWidth, 34, 32)
+func (m tuiModel) renderConverterBody(innerWidth, innerHeight int) string {
+	listWidth, rightWidth, stacked := splitPaneWidths(innerWidth, 28, 32)
 	if stacked {
-		formWidth = innerWidth
-		resultWidth = innerWidth
+		listWidth = innerWidth
+		rightWidth = innerWidth
 	}
+	listCardStyle := cardStyle(m.focus == 0).Width(listWidth)
+	rightCardStyle := cardStyle(m.focus >= 1).Width(rightWidth)
+	if !stacked {
+		listCardStyle = listCardStyle.Height(innerHeight)
+		rightCardStyle = rightCardStyle.Height(innerHeight)
+	}
+	listCard := listCardStyle.Render(m.currencyList.View())
 
 	selectedCode := "?"
 	selectedName := "brak wybranej waluty"
@@ -1312,7 +1368,6 @@ func (m tuiModel) renderConverterBody(innerWidth int) string {
 		convertButtonLabel = m.spinner.View() + " PRZELICZANIE"
 	}
 	convertButton := primaryButtonStyle(m.focus == 4 && !m.loading).Render(convertButtonLabel)
-	currencyButton := secondaryButtonStyle(m.focus == 0).Render("WYBIERZ WALUTĘ")
 	autoDirection := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("248")).
 		Render(m.directionStatusLabel(selectedCode))
@@ -1334,7 +1389,6 @@ func (m tuiModel) renderConverterBody(innerWidth int) string {
 	formLines := []string{
 		sectionTitle("WALUTA"),
 		activeCurrencyStyle.Render(fmt.Sprintf("%s - %s", strings.ToUpper(selectedCode), selectedName)),
-		currencyButton,
 		"",
 		sectionTitle("KWOTA PLN"),
 		m.plnAmountInput.View(),
@@ -1349,13 +1403,12 @@ func (m tuiModel) renderConverterBody(innerWidth int) string {
 		"",
 		convertButton,
 	}
-	formCard := cardStyle(m.focus <= 4).Width(formWidth).Render(strings.Join(formLines, "\n"))
-	resultCard := cardStyle(false).Width(resultWidth).Render(strings.Join([]string{resultTitle, m.resultsViewport.View()}, "\n"))
+	rightCard := rightCardStyle.Render(strings.Join(append(formLines, "", resultTitle, m.resultsViewport.View()), "\n"))
 
 	if stacked {
-		return lipgloss.JoinVertical(lipgloss.Left, formCard, resultCard)
+		return lipgloss.JoinVertical(lipgloss.Left, listCard, rightCard)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, formCard, " ", resultCard)
+	return lipgloss.JoinHorizontal(lipgloss.Top, listCard, " ", rightCard)
 }
 
 func (m tuiModel) renderCacheBody(innerWidth int) string {
@@ -1364,12 +1417,11 @@ func (m tuiModel) renderCacheBody(innerWidth int) string {
 		formWidth = innerWidth
 		statsWidth = innerWidth
 	}
-	pickerButton := secondaryButtonStyle(m.focus == 2).Render("[ WYBIERZ WALUTY DO POBRANIA ]")
 	importLabel := "[ POBIERZ ZAKRES ]"
 	if m.cacheBusy {
 		importLabel = m.spinner.View() + " POBIERANIE"
 	}
-	importButton := primaryButtonStyle(m.focus == 3 && !m.cacheBusy).Render(importLabel)
+	importButton := primaryButtonStyle(m.focus == 2 && !m.cacheBusy).Render(importLabel)
 
 	formCard := cardStyle(m.focus <= 3).Width(formWidth).Render(strings.Join([]string{
 		sectionTitle("ZAKRES DAT DO BAZY"),
@@ -1379,10 +1431,9 @@ func (m tuiModel) renderCacheBody(innerWidth int) string {
 		"Do:",
 		m.cacheToInput.View(),
 		"",
-		sectionTitle("USTAWIENIA WALUT"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("248")).Render(m.cacheSelectionStatus()),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(m.cacheSelectionPreview()),
-		pickerButton,
+		sectionTitle("ZAKRES IMPORTU"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("248")).Render("Import obejmuje wszystkie waluty z tabeli A."),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render("Ustawiasz tylko datę początkową i końcową."),
 		"",
 		sectionTitle("AKCJA"),
 		importButton,
@@ -1403,13 +1454,20 @@ func (m tuiModel) renderCacheBody(innerWidth int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, formCard, " ", statsCard)
 }
 
-func (m tuiModel) renderDatabaseBody(innerWidth int) string {
+func (m tuiModel) renderDatabaseBody(innerWidth, innerHeight int) string {
 	listWidth, detailWidth, stacked := splitPaneWidths(innerWidth, 28, 32)
 	if stacked {
 		listWidth = innerWidth
 		detailWidth = innerWidth
 	}
-	filterCard := cardStyle(m.focus == 0 || m.focus == 1 || m.focus == 2).Width(listWidth).Render(strings.Join([]string{
+	filterCardStyle := cardStyle(m.focus == 0 || m.focus == 1 || m.focus == 2).Width(listWidth)
+	detailCardStyle := cardStyle(m.focus == 3).Width(detailWidth)
+	if !stacked {
+		filterCardStyle = filterCardStyle.Height(innerHeight).MaxHeight(innerHeight)
+		detailCardStyle = detailCardStyle.Height(innerHeight).MaxHeight(innerHeight)
+	}
+
+	filterCard := filterCardStyle.Render(strings.Join([]string{
 		sectionTitle("FILTR"),
 		m.dbFilterInput.View(),
 		"",
@@ -1421,7 +1479,7 @@ func (m tuiModel) renderDatabaseBody(innerWidth int) string {
 		m.dbCurrencyList.View(),
 	}, "\n"))
 
-	detailCard := cardStyle(m.focus == 3).Width(detailWidth).Render(strings.Join([]string{
+	detailCard := detailCardStyle.Render(strings.Join([]string{
 		sectionTitle("SZCZEGÓŁY WALUTY"),
 		m.dbViewport.View(),
 	}, "\n"))
@@ -1452,49 +1510,37 @@ func (m tuiModel) renderCurrencyPickerModal(innerWidth, innerHeight int) string 
 	modalInnerWidth := maxInt(modalWidth-6, 18)
 	modalListHeight := maxInt(modalHeight-10, 3)
 
-	var content string
-	if m.currencyPickerTarget == pickerTargetConverter {
-		m.currencyList.SetSize(modalInnerWidth, modalListHeight)
-		content = strings.Join([]string{
-			titleStyle.Render("WYBÓR WALUTY"),
-			"",
-			m.currencyList.View(),
-			"",
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("248")).Render("Enter: wybierz • /: filtruj • Esc: zamknij"),
-		}, "\n")
-	} else {
-		allToggleStyle := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("14")).
-			Padding(0, 1)
+	allToggleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("14")).
+		Padding(0, 1)
 
-		if m.allCacheCurrencies {
-			allToggleStyle = allToggleStyle.Foreground(lipgloss.Color("10")).Background(lipgloss.Color("22"))
-		}
-
-		allLabel := "[ ] WSZYSTKIE WALUTY (pobierze wszystko z tabeli A)"
-		if m.allCacheCurrencies {
-			allLabel = "[x] WSZYSTKIE WALUTY (wybrane wszystkie)"
-		}
-
-		footer := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("248")).
-			PaddingTop(1).
-			Render("Enter/Spacja: zaznacz • a: przełącz wszystko • Esc: zamknij")
-
-		m.cacheCurrencyList.SetSize(modalInnerWidth, modalListHeight)
-		content = strings.Join([]string{
-			titleStyle.Render("WYBÓR WALUT DO IMPORTU"),
-			"",
-			allToggleStyle.Render(allLabel),
-			"",
-			m.cacheCurrencyList.View(),
-			"",
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("248")).Render(m.cacheSelectionStatus()),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(m.cacheSelectionPreview()),
-			footer,
-		}, "\n")
+	if m.allCacheCurrencies {
+		allToggleStyle = allToggleStyle.Foreground(lipgloss.Color("10")).Background(lipgloss.Color("22"))
 	}
+
+	allLabel := "[ ] WSZYSTKIE WALUTY (pobierze wszystko z tabeli A)"
+	if m.allCacheCurrencies {
+		allLabel = "[x] WSZYSTKIE WALUTY (wybrane wszystkie)"
+	}
+
+	footer := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("248")).
+		PaddingTop(1).
+		Render("Enter/Spacja: zaznacz • a: przełącz wszystko • Esc: zamknij")
+
+	m.cacheCurrencyList.SetSize(modalInnerWidth, modalListHeight)
+	content := strings.Join([]string{
+		titleStyle.Render("WYBÓR WALUT DO IMPORTU"),
+		"",
+		allToggleStyle.Render(allLabel),
+		"",
+		m.cacheCurrencyList.View(),
+		"",
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("248")).Render(m.cacheSelectionStatus()),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(m.cacheSelectionPreview()),
+		footer,
+	}, "\n")
 
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.DoubleBorder()).
@@ -1537,7 +1583,7 @@ func (m tuiModel) renderFooter(innerWidth int) string {
 }
 
 func (m tuiModel) selectedCurrency() (models.Currency, bool) {
-	item, ok := m.currencyList.SelectedItem().(currencyItem)
+	item, ok := m.currencyList.SelectedItem().(converterCurrencyItem)
 	if !ok {
 		return models.Currency{}, false
 	}
@@ -1579,11 +1625,11 @@ func (m tuiModel) textInputFocused() bool {
 }
 
 func (m tuiModel) canSwitchToPrevTab(msg tea.KeyPressMsg) bool {
-	return msg.String() == "ctrl+left" || (key.Matches(msg, m.keys.PrevTab) && !m.textInputFocused())
+	return msg.String() == "ctrl+shift+tab" || (key.Matches(msg, m.keys.PrevTab) && !m.textInputFocused())
 }
 
 func (m tuiModel) canSwitchToNextTab(msg tea.KeyPressMsg) bool {
-	return msg.String() == "ctrl+right" || (key.Matches(msg, m.keys.NextTab) && !m.textInputFocused())
+	return msg.String() == "ctrl+tab" || (key.Matches(msg, m.keys.NextTab) && !m.textInputFocused())
 }
 
 func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
@@ -1597,8 +1643,12 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 			return nil
 		}
 
-		titleHeight := lipgloss.Height(m.renderTitleBar(maxInt(m.width-4, 10)))
-		tabY := contentY + titleHeight
+		headerTopHeight := lipgloss.Height(lipgloss.JoinVertical(
+			lipgloss.Left,
+			m.renderTitleBar(maxInt(m.width-4, 10)),
+			m.renderHeaderDivider(maxInt(m.width-4, 10)),
+		))
+		tabY := contentY + headerTopHeight
 		if hitRect(mouse.X, mouse.Y, contentX, tabY, 14, 1) {
 			return func() tea.Msg { return mouseActionMsg{action: "tab-converter"} }
 		}
@@ -1611,6 +1661,8 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 
 		bodyX := contentX + 1
 		bodyY := contentY + lipgloss.Height(m.renderHeader(maxInt(m.width-4, 10))) + 1
+		bodyWidth := maxInt(m.shellInnerWidth()-2, 40)
+		bodyHeight := maxInt(m.bodyAreaHeight(), 10)
 
 		if m.currencyPickerOpen {
 			innerWidth := m.width - 4
@@ -1624,14 +1676,9 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 			modalY := bodyY + (m.bodyAreaHeight()-modalHeight)/2
 
 			listX := modalX + 2
-			listY := modalY + 4
-			target := "converter-picker"
-			model := m.currencyList
-			if m.currencyPickerTarget == pickerTargetCache {
-				listY = modalY + 6
-				target = "cache-picker"
-				model = m.cacheCurrencyList
-			}
+			listY := modalY + 6
+			target := "cache-picker"
+			model := m.cacheCurrencyList
 			if hitRect(mouse.X, mouse.Y, listX, listY, modalWidth-4, modalHeight-10) {
 				row := mouse.Y - listY
 				pageStart := model.Index() - model.Cursor()
@@ -1647,44 +1694,69 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 		}
 
 		if m.activeTab == 0 {
-			formX := bodyX
-			contentStartY := bodyY + 2
-			if hitRect(mouse.X, mouse.Y, formX+2, contentStartY+3, 28, 2) {
-				return func() tea.Msg { return mouseActionMsg{action: "open-converter-picker"} }
+			listWidth, rightWidth, stacked := splitPaneWidths(bodyWidth, 28, 32)
+			listX := bodyX
+			listY := bodyY
+			listCardStyle := cardStyle(m.focus == 0).Width(listWidth)
+			if !stacked {
+				listCardStyle = listCardStyle.Height(bodyHeight)
 			}
-			if hitRect(mouse.X, mouse.Y, formX+2, contentStartY+7, 28, 1) {
+			listCardRendered := listCardStyle.Render(m.currencyList.View())
+			listCardWidth := lipgloss.Width(listCardRendered)
+			listContentY := listY + 4
+
+			if mouse.X >= listX && mouse.X < listX+listCardWidth && mouse.Y >= listContentY {
+				row := mouse.Y - listContentY
+				pageStart := m.currencyList.Index() - m.currencyList.Cursor()
+				itemIndex := pageStart + row
+				visibleItems := m.currencyList.VisibleItems()
+				if itemIndex >= 0 && itemIndex < len(visibleItems) {
+					return func() tea.Msg {
+						return currencyClickedMsg{target: "converter", index: itemIndex}
+					}
+				}
+			}
+
+			rightX := bodyX
+			rightY := bodyY
+			if !stacked {
+				rightX = listX + listCardWidth + 1
+			} else {
+				rightY = bodyY + lipgloss.Height(listCardRendered)
+			}
+
+			contentStartY := rightY + 2
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+4, maxInt(rightWidth-4, 18), 1) {
 				return func() tea.Msg { return mouseActionMsg{action: "focus-amount"} }
 			}
-			if hitRect(mouse.X, mouse.Y, formX+2, contentStartY+11, 28, 1) {
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+8, maxInt(rightWidth-4, 18), 1) {
 				return func() tea.Msg { return mouseActionMsg{action: "focus-foreign-amount"} }
 			}
-			if hitRect(mouse.X, mouse.Y, formX+2, contentStartY+15, 28, 1) {
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+12, maxInt(rightWidth-4, 18), 1) {
 				return func() tea.Msg { return mouseActionMsg{action: "focus-date"} }
 			}
-			if hitRect(mouse.X, mouse.Y, formX+2, contentStartY+17, 24, 2) {
+			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+14, maxInt(rightWidth-4, 18), 2) {
 				return func() tea.Msg { return mouseActionMsg{action: "convert"} }
 			}
 			return nil
 		}
 
 		if m.activeTab == 2 {
+			leftWidth, _, _ := splitPaneWidths(bodyWidth, 28, 32)
 			leftX := bodyX
 			leftY := bodyY
-			leftWidth := maxInt((m.width-4)/3, 28)
-			if m.width < 110 {
-				leftWidth = m.width - 4
-			}
-			if hitRect(mouse.X, mouse.Y, leftX+2, leftY+4, leftWidth-4, 1) {
+			if hitRect(mouse.X, mouse.Y, leftX+2, leftY+3, maxInt(leftWidth-4, 18), 1) {
 				return func() tea.Msg { return mouseActionMsg{action: "focus-db-filter"} }
 			}
-			if hitRect(mouse.X, mouse.Y, leftX+2, leftY+8, leftWidth-4, 1) {
+			if hitRect(mouse.X, mouse.Y, leftX+2, leftY+6, maxInt(leftWidth-4, 18), 1) {
 				return func() tea.Msg { return mouseActionMsg{action: "toggle-db-sort"} }
 			}
-			listY := leftY + 12
-			if hitRect(mouse.X, mouse.Y, leftX+1, listY, leftWidth-2, maxInt(m.bodyAreaHeight()-14, 6)) {
-				row := mouse.Y - listY
+			listTopY := leftY + 10
+			firstItemY := listTopY + 4
+			if hitRect(mouse.X, mouse.Y, leftX+1, firstItemY, leftWidth-2, maxInt(m.bodyAreaHeight()-18, 4)) {
+				row := mouse.Y - firstItemY
 				pageStart := m.dbCurrencyList.Index() - m.dbCurrencyList.Cursor()
-				itemIndex := pageStart + row
+				itemIndex := pageStart + row/2
 				visibleItems := m.dbCurrencyList.VisibleItems()
 				if itemIndex >= 0 && itemIndex < len(visibleItems) {
 					return func() tea.Msg { return currencyClickedMsg{target: "db", index: itemIndex} }
@@ -1695,16 +1767,14 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 
 		formX := bodyX
 		formContentY := bodyY + 2
-		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+2, 28, 1) {
+		cacheFormWidth, _, _ := splitPaneWidths(bodyWidth, 34, 32)
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+2, maxInt(cacheFormWidth-4, 18), 1) {
 			return func() tea.Msg { return mouseActionMsg{action: "focus-cache-from"} }
 		}
-		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+5, 28, 1) {
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+5, maxInt(cacheFormWidth-4, 18), 1) {
 			return func() tea.Msg { return mouseActionMsg{action: "focus-cache-to"} }
 		}
-		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+10, 32, 1) {
-			return func() tea.Msg { return mouseActionMsg{action: "open-currency-picker"} }
-		}
-		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+14, 26, 1) {
+		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+12, maxInt(cacheFormWidth-4, 18), 1) {
 			return func() tea.Msg { return mouseActionMsg{action: "prefetch-cache"} }
 		}
 		return nil
@@ -1727,7 +1797,7 @@ func (m *tuiModel) startRangePrefetch() (tea.Model, tea.Cmd) {
 
 	currencies := m.selectedCacheCurrencyCodes()
 	if len(currencies) == 0 {
-		m.lastError = "wybierz co najmniej jedną walutę lub użyj opcji wszystkie"
+		m.lastError = "lista walut nie jest jeszcze gotowa"
 		return m, nil
 	}
 
@@ -1982,9 +2052,8 @@ func renderCacheInfo(info cache.Info, width int) string {
 		fmt.Sprintf("Ostatni zapis: %s", orDash(info.LastSavedAt)),
 		"",
 		sectionTitle("AKCJE"),
-		"/ - szukaj waluty w pickerze",
-		"spacja/enter - zaznacz walutę",
-		"a - przełącz wszystkie waluty",
+		"tab / shift+tab - przechodzenie między polami",
+		"enter - uruchom import dla całego zakresu",
 		"r - odśwież statystyki",
 		"c - wyczyść całą bazę cache",
 	}, "\n")
@@ -2054,7 +2123,7 @@ func batchCmds(cmds ...tea.Cmd) tea.Cmd {
 func (m *tuiModel) syncCacheCurrencyList() tea.Cmd {
 	items := make([]list.Item, 0, len(m.currencies))
 	for _, currency := range m.currencies {
-		items = append(items, currencyItem{
+		items = append(items, cacheCurrencyItem{
 			code:     currency.Code,
 			name:     currency.Name,
 			selected: m.selectedCacheCurrencies[currency.Code],
@@ -2144,7 +2213,7 @@ func (m *tuiModel) loadSelectedDBCurrencyHistory() (tea.Model, tea.Cmd) {
 }
 
 func (m *tuiModel) toggleCurrentCacheCurrency() tea.Cmd {
-	item, ok := m.cacheCurrencyList.SelectedItem().(currencyItem)
+	item, ok := m.cacheCurrencyList.SelectedItem().(cacheCurrencyItem)
 	if !ok {
 		return nil
 	}
@@ -2160,19 +2229,9 @@ func (m *tuiModel) toggleCurrentCacheCurrency() tea.Cmd {
 }
 
 func (m tuiModel) selectedCacheCurrencyCodes() []string {
-	if m.allCacheCurrencies {
-		codes := make([]string, 0, len(m.currencies))
-		for _, currency := range m.currencies {
-			codes = append(codes, currency.Code)
-		}
-		return codes
-	}
-
-	codes := make([]string, 0, len(m.selectedCacheCurrencies))
+	codes := make([]string, 0, len(m.currencies))
 	for _, currency := range m.currencies {
-		if m.selectedCacheCurrencies[currency.Code] {
-			codes = append(codes, currency.Code)
-		}
+		codes = append(codes, currency.Code)
 	}
 	return codes
 }
@@ -2331,13 +2390,13 @@ type cacheHelpMap struct {
 }
 
 func (m cacheHelpMap) ShortHelp() []key.Binding {
-	return []key.Binding{m.keys.Search, m.keys.ToggleAll, m.keys.Refresh, m.keys.ClearCache, m.keys.Quit}
+	return []key.Binding{m.keys.Refresh, m.keys.ClearCache, m.keys.NextFocus, m.keys.Quit}
 }
 
 func (m cacheHelpMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{m.keys.PrevTab, m.keys.NextTab, m.keys.NextFocus, m.keys.PrevFocus},
-		{m.keys.Search, m.keys.ToggleAll, m.keys.Refresh, m.keys.ClearCache},
+		{m.keys.Refresh, m.keys.ClearCache},
 		{m.keys.ToggleHelp, m.keys.Quit},
 	}
 }
