@@ -35,6 +35,13 @@ const (
 	directionForeignToPLN
 )
 
+type directionMode int
+
+const (
+	directionModeAuto directionMode = iota
+	directionModeManual
+)
+
 type currenciesLoadedMsg struct {
 	currencies []models.Currency
 	err        error
@@ -85,6 +92,10 @@ type currencyHistoryLoadedMsg struct {
 }
 
 type cacheClearedMsg struct {
+	err error
+}
+
+type configSavedMsg struct {
 	err error
 }
 
@@ -183,9 +194,10 @@ func (k tuiKeyMap) FullHelp() [][]key.Binding {
 }
 
 type tuiModel struct {
-	cfg     models.AppConfig
-	service *nbp.Service
-	store   cache.Store
+	configPath string
+	cfg        models.AppConfig
+	service    *nbp.Service
+	store      cache.Store
 
 	keys     tuiKeyMap
 	help     help.Model
@@ -213,6 +225,7 @@ type tuiModel struct {
 	dbViewport      viewport.Model
 
 	direction               conversionDirection
+	directionMode           directionMode
 	lastEditedAmount        amountField
 	loading                 bool
 	cacheBusy               bool
@@ -235,7 +248,7 @@ type tuiModel struct {
 	selectedCacheCurrencies map[string]bool
 }
 
-func newTUIModel(cfg models.AppConfig, service *nbp.Service, store cache.Store) tuiModel {
+func newTUIModel(configPath string, cfg models.AppConfig, service *nbp.Service, store cache.Store) tuiModel {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false
 	delegate.SetSpacing(0)
@@ -352,6 +365,7 @@ func newTUIModel(cfg models.AppConfig, service *nbp.Service, store cache.Store) 
 	prog := progress.New(progress.WithWidth(34))
 
 	return tuiModel{
+		configPath:              configPath,
 		cfg:                     cfg,
 		service:                 service,
 		store:                   store,
@@ -372,6 +386,8 @@ func newTUIModel(cfg models.AppConfig, service *nbp.Service, store cache.Store) 
 		cacheViewport:           cacheViewport,
 		dbViewport:              dbViewport,
 		status:                  "Gotowy",
+		direction:               directionPLNToForeign,
+		directionMode:           directionModeAuto,
 		lastEditedAmount:        amountFieldPLN,
 		dbSortMode:              dbSortByCode,
 		selectedCacheCurrencies: map[string]bool{},
@@ -427,6 +443,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCurrencyHistoryLoaded(msg, backgroundCmds)
 	case cacheClearedMsg:
 		return m.handleCacheCleared(msg, backgroundCmds)
+	case configSavedMsg:
+		return m.handleConfigSaved(msg, backgroundCmds)
 	case prefetchFinishedMsg:
 		return m.handlePrefetchFinished(msg, backgroundCmds)
 	case prefetchChunkFinishedMsg:
@@ -662,6 +680,15 @@ func (m *tuiModel) handleCacheCleared(msg cacheClearedMsg, backgroundCmds []tea.
 	return m, batchCmds(append(backgroundCmds, loadCacheInfoCmd(m.store), loadCurrencyStatsCmd(m.store), loadCurrenciesCmd(m.service, m.cfg.TimeoutSeconds))...)
 }
 
+func (m *tuiModel) handleConfigSaved(msg configSavedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.lastError = humanizeError(msg.err)
+		m.status = "Nie udało się zapisać ustawień"
+		return m, batchCmds(backgroundCmds...)
+	}
+	return m, batchCmds(backgroundCmds...)
+}
+
 func (m *tuiModel) handlePrefetchFinished(msg prefetchFinishedMsg, backgroundCmds []tea.Cmd) (tea.Model, tea.Cmd) {
 	m.cacheBusy = false
 	if msg.err != nil {
@@ -715,30 +742,42 @@ func (m tuiModel) View() tea.View {
 	// W Bubble Tea v2 Width i Height na stylu to CAŁKOWITY rozmiar bloku.
 	// Ustawiamy ramkę na dokładny wymiar terminala.
 	shell := shellStyle(m.width, m.height)
-	
+
 	// Zawartość wewnątrz ramki ma szerokość i wysokość o 4 mniejszą (2 obramowanie + 2 padding).
 	innerWidth := m.width - 4
 	innerHeight := m.height - 4
-	if innerWidth < 10 { innerWidth = 10 }
-	if innerHeight < 10 { innerHeight = 10 }
+	if innerWidth < 10 {
+		innerWidth = 10
+	}
+	if innerHeight < 10 {
+		innerHeight = 10
+	}
 
 	header := m.renderHeader(innerWidth)
-	body := m.renderBody(innerWidth, innerHeight)
 	status := m.renderStatus(innerWidth)
 	footer := m.renderFooter(innerWidth)
 
 	headerHeight := lipgloss.Height(header)
 	statusHeight := lipgloss.Height(status)
 	footerHeight := lipgloss.Height(footer)
-	
-	remainingHeight := innerHeight - headerHeight - statusHeight - footerHeight
-	if remainingHeight < 0 { remainingHeight = 0 }
 
-	// Wypełniamy body, aby wypchnąć status i footer na dół ramki.
-	expandedBody := lipgloss.NewStyle().Height(remainingHeight).Render(body)
+	remainingHeight := innerHeight - headerHeight - statusHeight - footerHeight
+	if remainingHeight < 0 {
+		remainingHeight = 0
+	}
+
+	bodyWidth := maxInt(innerWidth-2, 10)
+	bodyHeight := maxInt(remainingHeight-2, 3)
+	body := m.renderBody(bodyWidth, bodyHeight)
+	expandedBody := lipgloss.NewStyle().
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("8")).
+		Width(innerWidth).
+		Height(remainingHeight).
+		Render(body)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, header, expandedBody, status, footer)
-	
+
 	v := tea.NewView(shell.Render(content))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
@@ -846,6 +885,13 @@ func (m *tuiModel) handleConverterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			return m, m.focusCurrentField()
 		}
 	}
+	if key.Matches(msg, m.keys.ToggleDir) {
+		m.directionMode = directionModeManual
+		m.direction = m.converterDirection().next()
+		m.lastError = ""
+		m.status = "Ręcznie przełączono kierunek konwersji"
+		return m, nil
+	}
 
 	return m.updateConverterComponents(msg)
 }
@@ -939,6 +985,7 @@ func (m *tuiModel) updateConverterComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.plnAmountInput, cmd = m.plnAmountInput.Update(msg)
 		if m.plnAmountInput.Value() != before {
 			m.lastEditedAmount = amountFieldPLN
+			m.directionMode = directionModeAuto
 		}
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -949,6 +996,7 @@ func (m *tuiModel) updateConverterComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.foreignAmountInput, cmd = m.foreignAmountInput.Update(msg)
 		if m.foreignAmountInput.Value() != before {
 			m.lastEditedAmount = amountFieldForeign
+			m.directionMode = directionModeAuto
 		}
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1052,7 +1100,7 @@ func (m *tuiModel) startConversion() (tea.Model, tea.Cmd) {
 	m.status = "Pobieranie kursu i przeliczanie kwoty..."
 	return m, tea.Batch(
 		convertCurrencyCmd(m.service, m.cfg.TimeoutSeconds, currency, m.converterSourceAmount(), m.dateInput.Value(), m.converterDirection()),
-		saveConfigCmd(m.cfg),
+		saveConfigCmd(m.configPath, m.cfg),
 		spinnerTickCmd(m.spinner),
 	)
 }
@@ -1096,8 +1144,12 @@ func (m *tuiModel) focusCurrentField() tea.Cmd {
 func (m *tuiModel) resize() {
 	innerWidth := m.width - 4
 	innerHeight := m.height - 4
-	if innerWidth < 40 { innerWidth = 40 }
-	if innerHeight < 10 { innerHeight = 10 }
+	if innerWidth < 40 {
+		innerWidth = 40
+	}
+	if innerHeight < 10 {
+		innerHeight = 10
+	}
 
 	listWidth := innerWidth
 	rightWidth := innerWidth
@@ -1136,12 +1188,32 @@ func (m *tuiModel) resize() {
 }
 
 func (m tuiModel) renderHeader(innerWidth int) string {
-	return lipgloss.JoinVertical(lipgloss.Left, renderAsciiLogo(innerWidth), "", "", m.renderTabs())
+	return lipgloss.JoinVertical(lipgloss.Left, m.renderTitleBar(innerWidth), m.renderTabs())
+}
+
+func (m tuiModel) renderTitleBar(innerWidth int) string {
+	title := "KURSOMAT NBP"
+	subtitle := "CLI/TUI kursów walut z cache SQLite"
+	if m.activeTab == 1 {
+		subtitle = "Import i zarządzanie bazą cache"
+	} else if m.activeTab == 2 {
+		subtitle = "Przegląd walut zapisanych w bazie"
+	}
+
+	return lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1).
+		Foreground(lipgloss.Color("230")).
+		Background(lipgloss.Color("24")).
+		Width(innerWidth).
+		Render(title + " • " + subtitle)
 }
 
 func renderAsciiLogo(width int) string {
 	lineLen := width
-	if lineLen > 83 { lineLen = 83 }
+	if lineLen > 83 {
+		lineLen = 83
+	}
 	line := strings.Repeat("━", lineLen)
 	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 
@@ -1220,7 +1292,7 @@ func (m tuiModel) renderConverterBody(innerWidth int) string {
 	convertButton := primaryButtonStyle(m.focus == 4 && !m.loading).Render(convertButtonLabel)
 	autoDirection := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("248")).
-		Render("Auto kierunek: " + m.converterDirection().label(selectedCode))
+		Render(m.directionStatusLabel(selectedCode))
 
 	resultTitle := lipgloss.NewStyle().
 		Bold(true).
@@ -1380,7 +1452,7 @@ func (m tuiModel) renderStatus(innerWidth int) string {
 	style := lipgloss.NewStyle().
 		Padding(0, 1).
 		Foreground(lipgloss.Color("252")).
-		Background(lipgloss.Color("236")).
+		Background(lipgloss.Color("238")).
 		Width(innerWidth).
 		Height(1)
 
@@ -1392,7 +1464,9 @@ func (m tuiModel) renderStatus(innerWidth int) string {
 
 func (m tuiModel) renderFooter(innerWidth int) string {
 	style := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("248")).
+		Padding(0, 1).
+		Foreground(lipgloss.Color("250")).
+		Background(lipgloss.Color("236")).
 		Width(innerWidth)
 	if m.activeTab == 1 {
 		return style.Render(m.help.View(cacheHelpMap{keys: m.keys}))
@@ -1412,10 +1486,20 @@ func (m tuiModel) selectedCurrency() (models.Currency, bool) {
 }
 
 func (m tuiModel) converterDirection() conversionDirection {
+	if m.directionMode == directionModeManual {
+		return m.direction
+	}
 	if m.lastEditedAmount == amountFieldForeign {
 		return directionForeignToPLN
 	}
 	return directionPLNToForeign
+}
+
+func (m tuiModel) directionStatusLabel(code string) string {
+	if m.directionMode == directionModeManual {
+		return "Tryb kierunku: RĘCZNY - " + m.converterDirection().label(code)
+	}
+	return "Tryb kierunku: AUTO - " + m.converterDirection().label(code)
 }
 
 func (m tuiModel) converterSourceAmount() string {
@@ -1454,8 +1538,8 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 			return nil
 		}
 
-		logoHeight := lipgloss.Height(renderAsciiLogo(m.width - 4))
-		tabY := contentY + logoHeight
+		titleHeight := lipgloss.Height(m.renderTitleBar(maxInt(m.width-4, 10)))
+		tabY := contentY + titleHeight
 		if hitRect(mouse.X, mouse.Y, contentX, tabY, 14, 1) {
 			return func() tea.Msg { return mouseActionMsg{action: "tab-converter"} }
 		}
@@ -1466,7 +1550,8 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 			return func() tea.Msg { return mouseActionMsg{action: "tab-db"} }
 		}
 
-		bodyY := contentY + lipgloss.Height(m.renderHeader(m.width - 4))
+		bodyX := contentX + 1
+		bodyY := contentY + lipgloss.Height(m.renderHeader(maxInt(m.width-4, 10))) + 1
 
 		if m.currencyPickerOpen {
 			innerWidth := m.width - 4
@@ -1474,11 +1559,11 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 			modal := m.renderCurrencyPickerModal(innerWidth, innerHeight)
 			modalWidth := lipgloss.Width(modal)
 			modalHeight := lipgloss.Height(modal)
-			
+
 			// Obliczamy pozycję modala (jest wycentrowany w bodyArea)
-			modalX := contentX + (innerWidth-modalWidth)/2
+			modalX := bodyX + (maxInt(innerWidth-2, 10)-modalWidth)/2
 			modalY := bodyY + (m.bodyAreaHeight()-modalHeight)/2
-			
+
 			listX := modalX + 2
 			listY := modalY + 6 // Tytuł + pustka + przełącznik + pustka
 			if hitRect(mouse.X, mouse.Y, listX, listY, modalWidth-4, modalHeight-10) {
@@ -1496,7 +1581,7 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 		}
 
 		if m.activeTab == 0 {
-			listX := contentX
+			listX := bodyX
 			listY := bodyY
 			listCardRendered := cardStyle(m.focus == 0).Render(m.currencyList.View())
 			listCardWidth := lipgloss.Width(listCardRendered)
@@ -1514,13 +1599,13 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 				}
 			}
 
-			rightX := contentX
+			rightX := bodyX
 			if m.width >= 110 {
 				rightX = listX + listCardWidth + 1
 			} else {
 				bodyY = bodyY + lipgloss.Height(listCardRendered)
 			}
-			
+
 			contentStartY := bodyY + 2
 			if hitRect(mouse.X, mouse.Y, rightX+2, contentStartY+4, 28, 1) {
 				return func() tea.Msg { return mouseActionMsg{action: "focus-amount"} }
@@ -1538,7 +1623,7 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 		}
 
 		if m.activeTab == 2 {
-			leftX := contentX
+			leftX := bodyX
 			leftY := bodyY
 			leftWidth := maxInt((m.width-4)/3, 28)
 			if m.width < 110 {
@@ -1563,7 +1648,7 @@ func (m *tuiModel) onMouse() func(msg tea.MouseMsg) tea.Cmd {
 			return nil
 		}
 
-		formX := contentX
+		formX := bodyX
 		formContentY := bodyY + 2
 		if hitRect(mouse.X, mouse.Y, formX+2, formContentY+2, 28, 1) {
 			return func() tea.Msg { return mouseActionMsg{action: "focus-cache-from"} }
@@ -1622,7 +1707,7 @@ func (m *tuiModel) startRangePrefetch() (tea.Model, tea.Cmd) {
 	cmds := []tea.Cmd{
 		m.progress.SetPercent(0),
 		prefetchChunkCmd(m.service, m.cfg.TimeoutSeconds, chunks[0]),
-		saveConfigCmd(m.cfg),
+		saveConfigCmd(m.configPath, m.cfg),
 		spinnerTickCmd(m.spinner),
 	}
 	return m, tea.Batch(cmds...)
@@ -1826,10 +1911,9 @@ func clearCacheCmd(store cache.Store) tea.Cmd {
 	}
 }
 
-func saveConfigCmd(cfg models.AppConfig) tea.Cmd {
+func saveConfigCmd(configPath string, cfg models.AppConfig) tea.Cmd {
 	return func() tea.Msg {
-		_ = SaveConfig(cfg)
-		return nil
+		return configSavedMsg{err: SaveConfigAtPath(configPath, cfg)}
 	}
 }
 
@@ -2082,7 +2166,7 @@ func cardStyle(focused bool) lipgloss.Style {
 
 func shellStyle(width, height int) lipgloss.Style {
 	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.ThickBorder()).
+		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("12")).
 		Padding(1, 1).
 		Width(width).
@@ -2098,9 +2182,16 @@ func (m tuiModel) shellInnerWidth() int {
 }
 
 func (m tuiModel) bodyAreaHeight() int {
-	// m.height - 2 (shell border) - 2 (shell padding) = m.height - 4
-	h := m.height - 4
-	return h
+	innerWidth := maxInt(m.width-4, 10)
+	innerHeight := maxInt(m.height-4, 10)
+	headerHeight := lipgloss.Height(m.renderHeader(innerWidth))
+	statusHeight := lipgloss.Height(m.renderStatus(innerWidth))
+	footerHeight := lipgloss.Height(m.renderFooter(innerWidth))
+	height := innerHeight - headerHeight - statusHeight - footerHeight - 2
+	if height < 3 {
+		return 3
+	}
+	return height
 }
 
 func hitRect(x, y, left, top, width, height int) bool {
@@ -2158,13 +2249,13 @@ type converterHelpMap struct {
 }
 
 func (m converterHelpMap) ShortHelp() []key.Binding {
-	return []key.Binding{m.keys.Search, m.keys.NextFocus, m.keys.Quit}
+	return []key.Binding{m.keys.Search, m.keys.ToggleDir, m.keys.NextFocus, m.keys.Quit}
 }
 
 func (m converterHelpMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{m.keys.PrevTab, m.keys.NextTab, m.keys.NextFocus, m.keys.PrevFocus},
-		{m.keys.Search, m.keys.ToggleHelp, m.keys.Quit},
+		{m.keys.Search, m.keys.ToggleDir, m.keys.ToggleHelp, m.keys.Quit},
 	}
 }
 

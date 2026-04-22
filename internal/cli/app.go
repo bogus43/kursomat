@@ -1,19 +1,14 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"strings"
-	"time"
-
-	tea "charm.land/bubbletea/v2"
-
 	"kursomat/internal/cache"
 	"kursomat/internal/models"
 	"kursomat/internal/nbp"
+	"strings"
 )
 
 type App struct {
@@ -44,49 +39,21 @@ func (a *App) registerCommonFlags(fs *flag.FlagSet, opts *configOptions) {
 }
 
 func (a *App) prepareConfig(opts configOptions) (models.AppConfig, error) {
-	cfg, err := LoadConfig(opts.configPath)
+	runtimeCfg, err := a.prepareRuntimeConfig(opts)
 	if err != nil {
-		return cfg, err
+		return models.AppConfig{}, err
 	}
-	if opts.cachePath != "" {
-		cfg.CachePath = opts.cachePath
-	}
-	if opts.timeoutSeconds > 0 {
-		cfg.TimeoutSeconds = opts.timeoutSeconds
-	}
-	if opts.retryCount >= 0 {
-		cfg.RetryCount = opts.retryCount
-	}
-	if opts.lookbackDays > 0 {
-		cfg.MaxLookbackDays = opts.lookbackDays
-	}
-	if opts.verbose {
-		cfg.Verbose = true
-	}
-	cfg.Normalize()
-	return cfg, nil
+	return runtimeCfg.App, nil
 }
 
 func (a *App) Run(args []string) int {
-	if len(args) == 0 {
-		return a.runTUI(nil)
-	}
-
-	switch args[0] {
-	case "tui":
-		return a.runTUI(args[1:])
-	case "rate":
-		return a.runRate(args[1:])
-	case "cache":
-		return a.runCache(args[1:])
-	case "help", "--help", "-h":
-		a.printRootUsage()
-		return 0
-	default:
-		fmt.Fprintf(a.err, "Nieznana komenda: %s\n\n", args[0])
-		a.printRootUsage()
+	cmd := a.newRootCommand()
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		a.printError(err)
 		return 1
 	}
+	return 0
 }
 
 func (a *App) runRate(args []string) int {
@@ -112,7 +79,7 @@ func (a *App) runRate(args []string) int {
 		return 1
 	}
 
-	cfg, err := a.prepareConfig(opts)
+	runtimeCfg, err := a.prepareRuntimeConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
@@ -134,30 +101,7 @@ func (a *App) runRate(args []string) int {
 		return 1
 	}
 
-	store, err := cache.NewFileStore(cfg.CachePath)
-	if err != nil {
-		a.printError(err)
-		return 1
-	}
-	defer store.Close()
-	client := nbp.NewClient(nbp.ClientConfig{
-		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
-		RetryCount:      cfg.RetryCount,
-		MaxLookbackDays: cfg.MaxLookbackDays,
-		Verbose:         cfg.Verbose,
-	})
-	defer client.Close()
-	service := nbp.NewService(client, store)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
-	defer cancel()
-
-	rates, err := service.GetRates(ctx, currencies, requestedDate)
-	if err != nil {
-		a.printError(err)
-		return 1
-	}
-	if err := PrintRates(a.out, rates, outputFormat); err != nil {
+	if err := a.executeRate(runtimeCfg, currencies, requestedDate, outputFormat); err != nil {
 		a.printError(err)
 		return 1
 	}
@@ -178,31 +122,12 @@ func (a *App) runTUI(args []string) int {
 		return 1
 	}
 
-	cfg, err := a.prepareConfig(opts)
+	runtimeCfg, err := a.prepareRuntimeConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
 	}
-
-	store, err := cache.NewFileStore(cfg.CachePath)
-	if err != nil {
-		a.printError(err)
-		return 1
-	}
-	defer store.Close()
-	client := nbp.NewClient(nbp.ClientConfig{
-		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
-		RetryCount:      cfg.RetryCount,
-		MaxLookbackDays: cfg.MaxLookbackDays,
-		Verbose:         cfg.Verbose,
-		IsTUI:           true,
-	})
-	defer client.Close()
-	service := nbp.NewService(client, store)
-
-	model := newTUIModel(cfg, service, store)
-	program := tea.NewProgram(&model)
-	if _, err := program.Run(); err != nil {
+	if err := a.executeTUI(runtimeCfg); err != nil {
 		a.printError(err)
 		return 1
 	}
@@ -243,23 +168,15 @@ func (a *App) runCacheClear(args []string) int {
 		return 1
 	}
 
-	cfg, err := a.prepareConfig(opts)
+	runtimeCfg, err := a.prepareRuntimeConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
 	}
-
-	store, err := cache.NewFileStore(cfg.CachePath)
-	if err != nil {
+	if err := a.executeCacheClear(runtimeCfg); err != nil {
 		a.printError(err)
 		return 1
 	}
-	defer store.Close()
-	if err := store.Clear(); err != nil {
-		a.printError(err)
-		return 1
-	}
-	fmt.Fprintln(a.out, "Cache został wyczyszczony.")
 	return 0
 }
 
@@ -276,34 +193,15 @@ func (a *App) runCacheInfo(args []string) int {
 		return 1
 	}
 
-	cfg, err := a.prepareConfig(opts)
+	runtimeCfg, err := a.prepareRuntimeConfig(opts)
 	if err != nil {
 		a.printError(err)
 		return 1
 	}
-
-	store, err := cache.NewFileStore(cfg.CachePath)
-	if err != nil {
+	if err := a.executeCacheInfo(runtimeCfg); err != nil {
 		a.printError(err)
 		return 1
 	}
-	defer store.Close()
-
-	info, err := store.Info()
-	if err != nil {
-		a.printError(err)
-		return 1
-	}
-	fmt.Fprintf(
-		a.out,
-		"Ścieżka: %s\nLiczba wpisów kursów: %d\nLiczba mapowań zapytań: %d\nLiczba walut: %d\nRozmiar pliku: %d B\nOstatni zapis: %s\n",
-		info.Path,
-		info.Entries,
-		info.QueryMappings,
-		info.CurrencyCount,
-		info.SizeBytes,
-		orDash(info.LastSavedAt),
-	)
 	return 0
 }
 

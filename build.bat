@@ -7,13 +7,13 @@ if not exist "bin" (
   mkdir "bin"
 )
 
-echo [BUILD] Building kursownik-nbp...
-go build -o "bin\kursownik-nbp.exe" ".\cmd\kursownik-nbp"
+echo [BUILD] Building kursomat-nbp...
+go build -o "bin\kursomat-nbp.exe" ".\cmd\kursomat-nbp"
 if errorlevel 1 (
   echo [BUILD] Failed.
   exit /b %errorlevel%
 )
 
-echo [BUILD] Success: bin\kursownik-nbp.exe
+echo [BUILD] Success: bin\kursomat-nbp.exe
 exit /b 0
 
