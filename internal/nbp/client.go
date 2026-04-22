@@ -37,6 +37,7 @@ type Client struct {
 	verbose         bool
 	isTUI           bool
 	logger          *log.Logger
+	logFile         io.Closer
 }
 
 type rateRangeResponse struct {
@@ -91,12 +92,14 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 
 	var logOut io.Writer = os.Stderr
+	var logFile io.Closer
 	if cfg.IsTUI {
 		logDir := "logs"
 		_ = os.MkdirAll(logDir, 0o755)
 		f, err := os.OpenFile(filepath.Join(logDir, "nbp-client.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err == nil {
 			logOut = f
+			logFile = f
 		} else {
 			logOut = io.Discard
 		}
@@ -118,7 +121,15 @@ func NewClient(cfg ClientConfig) *Client {
 		verbose:         cfg.Verbose,
 		isTUI:           cfg.IsTUI,
 		logger:          logger,
+		logFile:         logFile,
 	}
+}
+
+func (c *Client) Close() error {
+	if c.logFile != nil {
+		return c.logFile.Close()
+	}
+	return nil
 }
 
 func (c *Client) GetRateOnOrBefore(ctx context.Context, currency string, requestedDate time.Time) (models.NBPRate, error) {
@@ -252,14 +263,11 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst any) error {
 			}
 			return lastErr
 		}
+		defer resp.Body.Close()
 
 		body, readErr := io.ReadAll(resp.Body)
-		closeErr := resp.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("nie udało się odczytać odpowiedzi API NBP: %w", readErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("nie udało się zamknąć odpowiedzi HTTP: %w", closeErr)
 		}
 
 		if resp.StatusCode == http.StatusOK {

@@ -10,16 +10,6 @@ import (
 	"kursomat/internal/models"
 )
 
-type fileConfig struct {
-	CachePath         string `json:"cache_path"`
-	TimeoutSeconds    int    `json:"timeout_seconds"`
-	RetryCount        int    `json:"retry_count"`
-	MaxLookbackDays   int    `json:"max_lookback_days"`
-	Verbose           bool   `json:"verbose"`
-	LastFromDate      string `json:"last_from_date"`
-	LastConverterDate string `json:"last_converter_date"`
-}
-
 func LoadConfig(configPath string) (models.AppConfig, error) {
 	cfg := models.DefaultConfig()
 	cfg.Normalize()
@@ -44,7 +34,7 @@ func LoadConfig(configPath string) (models.AppConfig, error) {
 		return cfg, fmt.Errorf("nie udało się odczytać pliku konfiguracyjnego: %w", err)
 	}
 
-	var parsed fileConfig
+	var parsed models.AppConfig
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return cfg, fmt.Errorf("niepoprawny plik konfiguracyjny: %w", err)
 	}
@@ -77,17 +67,8 @@ func LoadConfig(configPath string) (models.AppConfig, error) {
 
 func SaveConfig(cfg models.AppConfig) error {
 	path := models.DefaultConfigPath()
-	payload := fileConfig{
-		CachePath:         cfg.CachePath,
-		TimeoutSeconds:    cfg.TimeoutSeconds,
-		RetryCount:        cfg.RetryCount,
-		MaxLookbackDays:   cfg.MaxLookbackDays,
-		Verbose:           cfg.Verbose,
-		LastFromDate:      cfg.LastFromDate,
-		LastConverterDate: cfg.LastConverterDate,
-	}
 
-	data, err := json.MarshalIndent(payload, "", "  ")
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("nie udało się przygotować pliku konfiguracyjnego: %w", err)
 	}
@@ -104,14 +85,7 @@ func ensureConfigFile(path string, cfg models.AppConfig) error {
 		return nil
 	}
 
-	payload := fileConfig{
-		CachePath:       cfg.CachePath,
-		TimeoutSeconds:  cfg.TimeoutSeconds,
-		RetryCount:      cfg.RetryCount,
-		MaxLookbackDays: cfg.MaxLookbackDays,
-		Verbose:         cfg.Verbose,
-	}
-	data, err := json.MarshalIndent(payload, "", "  ")
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("nie udało się przygotować domyślnego pliku konfiguracyjnego: %w", err)
 	}

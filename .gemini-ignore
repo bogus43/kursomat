@@ -1,0 +1,26 @@
+# Przechowywanie zależności (bardzo ciężkie)
+vendor/
+
+# Binaria i skompilowany kod
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+__debug_bin
+
+# Dane lokalne i tymczasowe
+tmp/
+.git/
+.idea/
+.vscode/
+*.log
+
+# Cache Go
+.cache/
+
+# Pliki środowiskowe (mogą zawierać wrażliwe dane/klucze API)
+.env
+*.pem
+*.key

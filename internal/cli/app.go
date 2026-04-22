@@ -146,6 +146,7 @@ func (a *App) runRate(args []string) int {
 		MaxLookbackDays: cfg.MaxLookbackDays,
 		Verbose:         cfg.Verbose,
 	})
+	defer client.Close()
 	service := nbp.NewService(client, store)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
@@ -196,6 +197,7 @@ func (a *App) runTUI(args []string) int {
 		Verbose:         cfg.Verbose,
 		IsTUI:           true,
 	})
+	defer client.Close()
 	service := nbp.NewService(client, store)
 
 	model := newTUIModel(cfg, service, store)
