@@ -17,26 +17,26 @@ import (
 var ErrCorruptedCache = errors.New("uszkodzony cache")
 
 type Info struct {
-	Path          string
-	Entries       int
-	QueryMappings int
-	CurrencyCount int
-	LastSavedAt   string
-	SizeBytes     int64
+	Path          string `json:"path"`
+	Entries       int    `json:"entries"`
+	QueryMappings int    `json:"query_mappings"`
+	CurrencyCount int    `json:"currency_count"`
+	LastSavedAt   string `json:"last_saved_at"`
+	SizeBytes     int64  `json:"size_bytes"`
 }
 
 type CurrencyStat struct {
-	Code      string
-	Name      string
-	RateCount int
-	FirstDate string
-	LastDate  string
+	Code      string `json:"code"`
+	Name      string `json:"name"`
+	RateCount int    `json:"rate_count"`
+	FirstDate string `json:"first_date"`
+	LastDate  string `json:"last_date"`
 }
 
 type CurrencyHistoryEntry struct {
-	EffectiveRateDate string
-	Mid               float64
-	TableNo           string
+	EffectiveRateDate string  `json:"effective_rate_date"`
+	Mid               float64 `json:"mid"`
+	TableNo           string  `json:"table_no"`
 }
 
 type Store interface {
@@ -68,6 +68,8 @@ func NewFileStore(path string) (Store, error) {
 	if err != nil {
 		return nil, normalizeDBError(fmt.Errorf("nie udało się otworzyć bazy cache: %w", err))
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	store := &sqliteStore{
 		path: path,
@@ -357,8 +359,23 @@ func (s *sqliteStore) Save() error {
 }
 
 func (s *sqliteStore) Clear() error {
-	if _, err := s.db.Exec(`DELETE FROM query_cache; DELETE FROM rates; DELETE FROM currencies;`); err != nil {
-		return normalizeDBError(fmt.Errorf("nie udało się wyczyścić bazy cache: %w", err))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się rozpocząć czyszczenia bazy cache: %w", err))
+	}
+	defer tx.Rollback()
+
+	for _, statement := range []string{
+		"DELETE FROM query_cache",
+		"DELETE FROM rates",
+		"DELETE FROM currencies",
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return normalizeDBError(fmt.Errorf("nie udało się wyczyścić bazy cache: %w", err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return normalizeDBError(fmt.Errorf("nie udało się zatwierdzić czyszczenia bazy cache: %w", err))
 	}
 	return nil
 }

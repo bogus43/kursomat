@@ -169,3 +169,55 @@ func TestFileStoreClear(t *testing.T) {
 		t.Fatalf("expected no currencies after clear")
 	}
 }
+
+func TestFileStoreUsesSingleConnection(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	defer store.Close()
+
+	sqlite := store.(*sqliteStore)
+	if got := sqlite.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1", got)
+	}
+}
+
+func TestFileStoreClearRollsBackAllDeletesOnFailure(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.StoreResolvedRate("EUR", "2026-04-14", models.NBPRate{
+		Currency: "EUR", EffectiveRateDate: "2026-04-14", Mid: 4.2551, TableNo: "072/A/NBP/2026",
+	}); err != nil {
+		t.Fatalf("StoreResolvedRate() error = %v", err)
+	}
+
+	sqlite := store.(*sqliteStore)
+	if _, err := sqlite.db.Exec(`
+CREATE TRIGGER prevent_rate_delete
+BEFORE DELETE ON rates
+BEGIN
+  SELECT RAISE(ABORT, 'delete blocked by test');
+END;`); err != nil {
+		t.Fatalf("cannot install failure trigger: %v", err)
+	}
+
+	if err := store.Clear(); err == nil {
+		t.Fatal("Clear() expected an error")
+	}
+	_, found, err := store.GetByQuery("EUR", "2026-04-14")
+	if err != nil {
+		t.Fatalf("GetByQuery() error = %v", err)
+	}
+	if !found {
+		t.Fatal("Clear() partially deleted data instead of rolling back")
+	}
+}

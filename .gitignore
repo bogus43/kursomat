@@ -34,3 +34,14 @@ logs/
 # Editor/IDE
 # .idea/
 # .vscode/
+graphify-out
+.codex
+.gemini
+
+# Wails / frontend
+frontend/node_modules/
+frontend/dist/*
+!frontend/dist/.gitkeep
+build/bin/
+build/windows/installer/project.iss
+artifacts/

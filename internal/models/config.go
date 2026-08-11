@@ -1,6 +1,7 @@
 package models
 
 import (
+	"os"
 	"path/filepath"
 )
 
@@ -12,6 +13,7 @@ const (
 	DefaultConfigDir      = "config"
 	DefaultCacheFileName  = "kursomat.db"
 	DefaultConfigFileName = "kursomat.json"
+	DefaultAppDirName     = "kursomat"
 )
 
 type AppConfig struct {
@@ -50,9 +52,17 @@ func (c *AppConfig) Normalize() {
 }
 
 func DefaultCachePath() string {
-	return filepath.Join(".", DefaultDataDir, DefaultCacheFileName)
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		return filepath.Join(".", DefaultDataDir, DefaultCacheFileName)
+	}
+	return filepath.Join(base, DefaultAppDirName, DefaultCacheFileName)
 }
 
 func DefaultConfigPath() string {
-	return filepath.Join(".", DefaultConfigDir, DefaultConfigFileName)
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		return filepath.Join(".", DefaultConfigDir, DefaultConfigFileName)
+	}
+	return filepath.Join(base, DefaultAppDirName, DefaultConfigFileName)
 }

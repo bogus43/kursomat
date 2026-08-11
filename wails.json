@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "kursomat",
+  "outputfilename": "Kursomat",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Kursomat"
+  },
+  "info": {
+    "companyName": "Kursomat",
+    "productName": "Kursomat",
+    "productVersion": "2.0.0",
+    "copyright": "Copyright Kursomat",
+    "comments": "Desktopowy konwerter kursów NBP"
+  }
+}

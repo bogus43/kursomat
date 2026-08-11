@@ -3,12 +3,14 @@ setlocal
 
 cd /d "%~dp0"
 
-call "%~dp0build.bat"
+where wails >nul 2>nul
 if errorlevel 1 (
-  exit /b %errorlevel%
+  echo [RUN] Wails CLI is not installed.
+  echo [RUN] Run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+  exit /b 1
 )
 
-echo [RUN] Starting kursomat...
-"%~dp0bin\kursomat.exe" %*
+echo [RUN] Starting Kursomat in development mode...
+wails dev
 set "EXIT_CODE=%ERRORLEVEL%"
 exit /b %EXIT_CODE%

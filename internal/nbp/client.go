@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,8 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"charm.land/log/v2"
 
 	"kursomat/internal/models"
 )
@@ -25,7 +24,7 @@ type ClientConfig struct {
 	RetryCount      int
 	MaxLookbackDays int
 	Verbose         bool
-	IsTUI           bool
+	LogPath         string
 	HTTPClient      *http.Client
 }
 
@@ -34,9 +33,7 @@ type Client struct {
 	httpClient      *http.Client
 	retryCount      int
 	maxLookbackDays int
-	verbose         bool
-	isTUI           bool
-	logger          *log.Logger
+	logger          *slog.Logger
 	logFile         io.Closer
 }
 
@@ -91,35 +88,28 @@ func NewClient(cfg ClientConfig) *Client {
 		maxLookback = 92
 	}
 
-	var logOut io.Writer = os.Stderr
+	var logOut io.Writer = io.Discard
 	var logFile io.Closer
-	if cfg.IsTUI {
-		logDir := "logs"
-		_ = os.MkdirAll(logDir, 0o755)
-		f, err := os.OpenFile(filepath.Join(logDir, "nbp-client.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if cfg.Verbose {
+		logPath := strings.TrimSpace(cfg.LogPath)
+		if logPath == "" {
+			logPath = filepath.Join("logs", "nbp-client.log")
+		}
+		_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err == nil {
 			logOut = f
 			logFile = f
-		} else {
-			logOut = io.Discard
 		}
 	}
 
-	logger := log.New(logOut)
-	logger.SetPrefix("nbp-client")
-	if cfg.Verbose {
-		logger.SetLevel(log.DebugLevel)
-	} else {
-		logger.SetLevel(log.InfoLevel)
-	}
+	logger := slog.New(slog.NewTextHandler(logOut, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	return &Client{
 		baseURL:         strings.TrimRight(baseURL, "/"),
 		httpClient:      httpClient,
 		retryCount:      retryCount,
 		maxLookbackDays: maxLookback,
-		verbose:         cfg.Verbose,
-		isTUI:           cfg.IsTUI,
 		logger:          logger,
 		logFile:         logFile,
 	}
@@ -263,11 +253,13 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, dst any) error {
 			}
 			return lastErr
 		}
-		defer resp.Body.Close()
-
 		body, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("nie udało się odczytać odpowiedzi API NBP: %w", readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("nie udało się zamknąć odpowiedzi API NBP: %w", closeErr)
 		}
 
 		if resp.StatusCode == http.StatusOK {

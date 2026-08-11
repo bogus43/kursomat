@@ -1,160 +1,121 @@
 # Kursomat
 
-`Kursomat` to pełnoekranowa aplikacja terminalowa w Go do pobierania średnich kursów walut z oficjalnego API NBP (tabela A), z lokalnym cache w bazie SQLite.
+Kursomat to wieloplatformowa aplikacja desktopowa do przeliczania walut według średnich kursów tabeli A Narodowego Banku Polskiego. Interfejs działa w Wails v2 z Reactem, a pobrane notowania są zapisywane lokalnie w SQLite.
 
-Aplikacja oferuje:
-- klasyczne komendy CLI (`rate`, `cache`),
-- interfejs TUI (pelnoekranowy terminal UI) uruchamiany komenda `tui` lub domyslnie bez argumentow,
-- konwerter dwukierunkowy `PLN <-> waluta z NBP`,
-- picker waluty oparty o biblioteki Charmbracelet.
+## Funkcje
 
-## Funkcje MVP
+- automatyczne przeliczanie waluty na PLN i PLN na walutę dla wybranej daty,
+- przypinanie ulubionych walut oraz kopiowanie wyniku do schowka,
+- automatyczne użycie ostatniego dostępnego notowania dla dnia wolnego,
+- zbiorcze pobieranie wielu walut i zakresów dat,
+- bieżący postęp oraz anulowanie długiego importu,
+- przegląd walut, zakresu danych, wykresu trendu i 120 ostatnich notowań w bazie,
+- eksport pełnej historii wybranej waluty do CSV albo JSON,
+- filtrowanie, sortowanie i bezpieczne czyszczenie lokalnego cache,
+- edycja parametrów sieciowych i wybór pliku bazy w natywnym oknie systemowym,
+- jasny i ciemny motyw zapamiętywany między uruchomieniami.
 
-- pobieranie kursu dla pojedynczej waluty i daty,
-- obsługa wielu walut dla jednej daty,
-- konwerter dwukierunkowy w TUI dla dowolnej waluty z tabeli A NBP,
-- automatyczny fallback do najbliższej wcześniejszej daty publikacji,
-- lokalny cache w SQLite (bez ponownego pobierania tych samych danych),
-- cache listy walut NBP do bazy,
-- tryb wyjścia `text` i `json`,
-- komendy zarządzania cache: `cache info`, `cache clear`,
-- retry + timeout dla żądań HTTP,
-- komunikaty błędów po polsku.
-
-## Waluty
-
-- CLI akceptuje poprawne kody ISO 4217, a weryfikacja danych odbywa sie przez odpowiedz API NBP.
-- TUI ładuje i cache'uje listę walut z aktualnej tabeli A NBP, a wybór odbywa się z pickera.
+Główne widoki mieszczą się w oknie aplikacji. Przewijanie jest ograniczone do list walut i historii, które mogą zawierać wiele rekordów.
 
 ## Wymagania
 
-- Go 1.25+
+- Go 1.25.8 lub nowszy zgodny z `go.mod`,
+- Node.js z npm,
+- Wails CLI 2.13.0,
+- zależności systemowe Wails właściwe dla Windows, macOS albo Linux.
 
-## Instalacja
+Instalacja używanej wersji Wails CLI:
 
-```bash
-go build -o kursomat ./cmd/kursomat
+```powershell
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
 ```
 
-## Użycie
+Instalacja zależności frontendu:
 
-### Start TUI (domyślny)
-
-```bash
-./kursomat
-# lub
-./kursomat tui
+```powershell
+cd frontend
+npm install
+cd ..
 ```
 
-### Pobranie jednego kursu
+## Uruchamianie
 
-```bash
-./kursomat rate --currency USD --date 2026-04-14
+Tryb programistyczny z przeładowywaniem frontendu:
+
+```powershell
+wails dev
 ```
 
-### Pobranie wielu kursów
+Na Windows można użyć skrótu:
 
-```bash
-./kursomat rate --currency USD,EUR,CHF --date 2026-04-14
+```powershell
+.\run.bat
 ```
 
-### Wyjście JSON
+## Budowanie
 
-```bash
-./kursomat rate --currency USD --date 2026-04-14 --output json
+Pakiet dla aktualnego systemu operacyjnego buduje się poleceniem:
+
+```powershell
+wails build -clean
 ```
 
-### Cache
+Na Windows dostępny jest także:
 
-```bash
-./kursomat cache info
-./kursomat cache clear
+```powershell
+.\build.bat
 ```
 
-### Skróty TUI
+Wynik trafia do `build/bin/`. Wails buduje natywny pakiet na systemie, na którym jest uruchomiony, dlatego wydania dla Windows, macOS i Linux należy przygotować na odpowiednich systemach lub runnerach CI.
 
-- `←/→` przełączanie zakładek (`Konwerter` / `Baza cache`)
-- `Tab` / `Shift+Tab` zmiana fokusu
-- `Enter` akcja główna
-- `d` odwrócenie kierunku konwersji
-- `r` odśwież informacje o cache (w zakładce cache)
-- `c` wyczyść cache (w zakładce cache)
-- `?` pokazanie/skrycie pełnej pomocy
-- `q` lub `Ctrl+C` wyjście
+## Obsługa
 
-## Konfiguracja
+1. W widoku **Konwerter** wybierz kierunek, walutę, datę i kwotę. Wynik jest aktualizowany automatycznie po krótkiej przerwie w edycji; automat można wyłączyć i używać przycisku **Przelicz kwotę**.
+2. W widoku **Dane NBP** ustaw zakres dat, zaznacz waluty i rozpocznij import. Operację można anulować bez zamykania aplikacji.
+3. W widoku **Baza** filtruj zapisane waluty, wybierz pozycję, przejrzyj trend i historię albo wyeksportuj wszystkie notowania do CSV/JSON.
+4. Przycisk ustawień w panelu bocznym otwiera konfigurację bazy, timeoutu, ponowień i diagnostyki.
+5. Przycisk słońca lub księżyca przełącza jasny i ciemny motyw.
 
-Aplikacja ma sensowne wartości domyślne. Opcjonalnie można podać plik konfiguracyjny JSON przez `--config`.
+## Dane i konfiguracja
 
-Przy starcie aplikacja automatycznie tworzy:
-- katalog `./data` oraz plik `./data/kursownik.db`,
-- katalog `./config` oraz plik `./config/kursomat.json`.
+Domyślne lokalizacje są wyznaczane przez system:
 
-Przykład:
+- konfiguracja: katalog konfiguracji użytkownika, podkatalog `kursomat/kursomat.json`,
+- baza SQLite: katalog cache użytkownika, podkatalog `kursomat/kursomat.db`,
+- log diagnostyczny: obok pliku bazy, gdy diagnostyka jest włączona.
 
-```json
-{
-  "cache_path": "C:/tmp/kursownik.db",
-  "timeout_seconds": 10,
-  "retry_count": 2,
-  "max_lookback_days": 92,
-  "verbose": false
-}
-```
+Przy pierwszym uruchomieniu aplikacja rozpoznaje starsze pliki `config/kursomat.json` oraz `config/kursownik-nbp.json` i migruje ustawienia do nowej lokalizacji. Ścieżkę bazy można później zmienić w ustawieniach.
 
-Flagi CLI mają wyższy priorytet niż plik konfiguracyjny:
+Konfigurację wdrożeniową można nadpisać zmiennymi środowiskowymi:
 
-- `--cache-path`
-- `--timeout`
-- `--retry`
-- `--lookback-days`
-- `--verbose`
+- `KURSOMAT_CACHE_PATH`,
+- `KURSOMAT_TIMEOUT_SECONDS`,
+- `KURSOMAT_RETRY_COUNT`,
+- `KURSOMAT_MAX_LOOKBACK_DAYS`,
+- `KURSOMAT_VERBOSE`.
 
-## Przykład wyjścia tekstowego
+## Weryfikacja
 
-```text
-Waluta: USD
-Data żądana: 2026-04-14
-Data kursu: 2026-04-13
-Kurs średni NBP: 3.8123
-Tabela: 071/A/NBP/2026
-Źródło: NBP API
-```
-
-## Przykład wyjścia JSON
-
-```json
-{
-  "currency": "USD",
-  "requested_date": "2026-04-14",
-  "effective_rate_date": "2026-04-13",
-  "mid": 3.8123,
-  "table_no": "071/A/NBP/2026",
-  "source": "NBP API"
-}
-```
-
-## Architektura
-
-```text
-cmd/kursomat/main.go              # entrypoint CLI
-internal/cli                      # parser komend, walidacja, output, config
-internal/nbp                      # klient API NBP + retry/timeout + logika daty kursu
-internal/cache                    # cache SQLite (kursy, mapa zapytań, lista walut)
-internal/models                   # wspólne modele i konfiguracja
-```
-
-## Testy
-
-Uruchomienie testów:
-
-```bash
+```powershell
 go test ./...
+go vet ./...
+cd frontend
+npm run build
 ```
 
-Zakres testów:
+Pełne sprawdzenie integracji desktopowej wykonuje `wails build -clean`.
 
-- walidacja wejścia (`internal/cli`),
-- parser odpowiedzi API i logika wyboru daty (`internal/nbp`),
-- cache (`internal/cache`),
-- integracyjny test klienta NBP z `httptest`.
+## Struktura
+
+```text
+main.go                         # start natywnej aplikacji Wails
+app.go                          # adapter metod dostępnych dla interfejsu
+internal/appcore                # przypadki użycia, konfiguracja i walidacja
+internal/nbp                    # klient API NBP, retry i obsługa dat
+internal/cache                  # repozytorium SQLite
+internal/models                 # wspólne modele domenowe
+frontend/src                    # React, widoki i motywy
+build                           # ikony, metadane i wynik budowania
+```
+
+Projekt nie udostępnia już interfejsu CLI ani TUI.
