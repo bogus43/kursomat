@@ -105,6 +105,16 @@ npm run build
 
 Pełne sprawdzenie integracji desktopowej wykonuje `wails build -clean`.
 
+Testy parsera kwot i dat frontendu:
+
+```sh
+cd frontend
+npm test
+```
+
+Na systemach Linux z WebKitGTK 4.1 użyj `wails build -clean -tags webkit2_41`.
+Wyniki weryfikacji, opis poprawionych błędów i ograniczenia środowiskowe znajdują się w [raporcie](docs/VERIFICATION.md), a przepływ danych w [mapie repozytorium](docs/REPOSITORY_MAP.md).
+
 ## Struktura
 
 ```text
