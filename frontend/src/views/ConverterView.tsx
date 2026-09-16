@@ -2,6 +2,7 @@ import { ArrowRight, CalendarDays, Copy, RefreshCw, Star } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ClipboardSetText } from '../../wailsjs/runtime/runtime'
 import { api, errorMessage } from '../api'
+import { localDate, parseAmount } from '../conversion'
 import type { ConversionResult, Currency, Dashboard, Direction, Notice } from '../types'
 
 interface ConverterViewProps {
@@ -11,7 +12,6 @@ interface ConverterViewProps {
   onChanged: () => Promise<void>
 }
 
-const today = new Date().toISOString().slice(0, 10)
 const number = new Intl.NumberFormat('pl-PL', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
 const favoritesKey = 'kursomat-favorite-currencies'
 const autoConvertKey = 'kursomat-auto-convert'
@@ -26,6 +26,7 @@ function readFavorites(): string[] {
 }
 
 export function ConverterView({ currencies, dashboard, onNotice, onChanged }: ConverterViewProps) {
+  const today = localDate()
   const [currency, setCurrency] = useState('USD')
   const [amount, setAmount] = useState('100,00')
   const [date, setDate] = useState(dashboard.config.last_converter_date || today)
@@ -55,8 +56,11 @@ export function ConverterView({ currencies, dashboard, onNotice, onChanged }: Co
   }, [currencies, currency])
 
   const runConversion = useCallback(async (notify: boolean) => {
-    const parsedAmount = Number(amount.trim().replace(',', '.'))
-    if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
+    const sequence = ++requestSequence.current
+    setResult(null)
+    setLoading(false)
+    const parsedAmount = parseAmount(amount)
+    if (parsedAmount === null) {
       if (notify) onNotice({ kind: 'error', message: 'Podaj poprawną, nieujemną kwotę.' })
       return
     }
@@ -64,13 +68,16 @@ export function ConverterView({ currencies, dashboard, onNotice, onChanged }: Co
       if (notify) onNotice({ kind: 'error', message: 'Wybierz walutę.' })
       return
     }
-    const sequence = ++requestSequence.current
+    if (!date) {
+      if (notify) onNotice({ kind: 'error', message: 'Wybierz datę kursu.' })
+      return
+    }
     setLoading(true)
     try {
       const converted = await api.convert({ currency, amount: parsedAmount, date, direction })
       if (sequence !== requestSequence.current) return
       setResult(converted)
-      if (notify) onNotice({ kind: 'success', message: `Przeliczono według kursu z ${converted.rate.effective_rate_date}.` })
+      onNotice(notify ? { kind: 'success', message: `Przeliczono według kursu z ${converted.rate.effective_rate_date}.` } : null)
       if (converted.rate.source !== 'cache') await onChanged()
     } catch (error) {
       if (sequence === requestSequence.current) onNotice({ kind: 'error', message: errorMessage(error) })
@@ -82,11 +89,26 @@ export function ConverterView({ currencies, dashboard, onNotice, onChanged }: Co
   useEffect(() => {
     localStorage.setItem(autoConvertKey, String(autoConvert))
     requestSequence.current += 1
+    setResult(null)
     setLoading(false)
     if (!autoConvert || currencies.length === 0) return
     const timer = window.setTimeout(() => void runConversion(false), 450)
     return () => window.clearTimeout(timer)
   }, [autoConvert, currencies.length, runConversion])
+
+  useEffect(() => () => { requestSequence.current += 1 }, [])
+
+  const invalidateResult = () => {
+    requestSequence.current += 1
+    setLoading(false)
+    setResult(null)
+  }
+
+  const changeDirection = (next: Direction) => {
+    if (next === direction) return
+    invalidateResult()
+    setDirection(next)
+  }
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault()
@@ -133,10 +155,10 @@ export function ConverterView({ currencies, dashboard, onNotice, onChanged }: Co
           </div>
 
           <div className="segmented" aria-label="Kierunek przeliczenia">
-            <button type="button" className={direction === 'pln_to_foreign' ? 'selected' : ''} onClick={() => setDirection('pln_to_foreign')}>
+            <button type="button" className={direction === 'pln_to_foreign' ? 'selected' : ''} onClick={() => changeDirection('pln_to_foreign')}>
               PLN na walutę
             </button>
-            <button type="button" className={direction === 'foreign_to_pln' ? 'selected' : ''} onClick={() => setDirection('foreign_to_pln')}>
+            <button type="button" className={direction === 'foreign_to_pln' ? 'selected' : ''} onClick={() => changeDirection('foreign_to_pln')}>
               Waluta na PLN
             </button>
           </div>
@@ -144,7 +166,7 @@ export function ConverterView({ currencies, dashboard, onNotice, onChanged }: Co
           <label className="field amount-field">
             <span>Kwota źródłowa</span>
             <div className="input-with-suffix">
-              <input inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} autoFocus />
+              <input inputMode="decimal" value={amount} onChange={(event) => { invalidateResult(); setAmount(event.target.value) }} autoFocus />
               <strong>{direction === 'pln_to_foreign' ? 'PLN' : currency}</strong>
             </div>
           </label>
@@ -152,7 +174,7 @@ export function ConverterView({ currencies, dashboard, onNotice, onChanged }: Co
           <label className="field">
             <span>Waluta</span>
             <div className="currency-picker">
-              <select value={currency} disabled={currencies.length === 0} onChange={(event) => setCurrency(event.target.value)}>
+              <select value={currency} disabled={currencies.length === 0} onChange={(event) => { invalidateResult(); setCurrency(event.target.value) }}>
                 {sortedCurrencies.map((item) => <option key={item.code} value={item.code}>{favorites.includes(item.code) ? '★ ' : ''}{item.code} · {item.name}</option>)}
               </select>
               <button className={favorites.includes(currency) ? 'icon-button bordered favorite' : 'icon-button bordered'} type="button" aria-label={favorites.includes(currency) ? 'Usuń z ulubionych' : 'Dodaj do ulubionych'} title={favorites.includes(currency) ? 'Usuń z ulubionych' : 'Dodaj do ulubionych'} onClick={toggleFavorite}>
@@ -165,7 +187,7 @@ export function ConverterView({ currencies, dashboard, onNotice, onChanged }: Co
             <span>Data kursu</span>
             <div className="input-icon">
               <CalendarDays size={17} />
-              <input type="date" max={today} value={date} onChange={(event) => setDate(event.target.value)} />
+              <input type="date" max={today} value={date} onChange={(event) => { invalidateResult(); setDate(event.target.value) }} />
             </div>
           </label>
 

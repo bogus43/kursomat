@@ -1,6 +1,7 @@
 import { CalendarRange, CheckSquare2, Download, Search, Square, XCircle } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { api, errorMessage } from '../api'
+import { localDate } from '../conversion'
 import type { Currency, Dashboard, ImportProgress, Notice } from '../types'
 
 interface ImportViewProps {
@@ -10,15 +11,16 @@ interface ImportViewProps {
   onChanged: () => Promise<void>
 }
 
-const today = new Date().toISOString().slice(0, 10)
-
 function monthAgo() {
   const date = new Date()
-  date.setMonth(date.getMonth() - 1)
-  return date.toISOString().slice(0, 10)
+  const previous = new Date(date.getFullYear(), date.getMonth() - 1, 1)
+  const lastDay = new Date(date.getFullYear(), date.getMonth(), 0).getDate()
+  previous.setDate(Math.min(date.getDate(), lastDay))
+  return localDate(previous)
 }
 
 export function ImportView({ currencies, dashboard, onNotice, onChanged }: ImportViewProps) {
+  const today = localDate()
   const [startDate, setStartDate] = useState(dashboard.config.last_from_date || monthAgo())
   const [endDate, setEndDate] = useState(today)
   const [selected, setSelected] = useState<Set<string>>(new Set())
