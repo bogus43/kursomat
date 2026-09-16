@@ -190,21 +190,28 @@ func (s *Service) Convert(ctx context.Context, request ConvertRequest) (Conversi
 	if math.IsNaN(rate.Mid) || math.IsInf(rate.Mid, 0) || rate.Mid <= 0 {
 		return ConversionResult{}, fmt.Errorf("otrzymano niepoprawny kurs dla waluty %s", code)
 	}
+	if err := (models.NBPRate{Currency: rate.Currency, EffectiveRateDate: rate.EffectiveRateDate, Mid: rate.Mid}).Validate(code); err != nil {
+		return ConversionResult{}, err
+	}
+	if rate.RequestedDate != date.Format("2006-01-02") || rate.EffectiveRateDate > rate.RequestedDate {
+		return ConversionResult{}, fmt.Errorf("kurs nie odpowiada żądanej dacie")
+	}
 
 	result := ConversionResult{
 		SourceAmount:   request.Amount,
 		SourceCurrency: "PLN",
-		TargetAmount:   request.Amount / rate.Mid,
 		TargetCurrency: code,
 		Rate:           rate,
 	}
 	if direction == "foreign_to_pln" {
 		result.SourceCurrency = code
 		result.TargetCurrency = "PLN"
-		result.TargetAmount = request.Amount * rate.Mid
 	}
-	result.TargetAmount = math.Round(result.TargetAmount*currencyPrecision) / currencyPrecision
-	if err := s.persistDate("converter", request.Date); err != nil {
+	result.TargetAmount, err = convertedAmount(request.Amount, rate.Mid, direction == "foreign_to_pln")
+	if err != nil {
+		return ConversionResult{}, err
+	}
+	if err := s.persistDate("converter", date.Format("2006-01-02")); err != nil {
 		return ConversionResult{}, err
 	}
 	return result, nil

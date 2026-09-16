@@ -89,7 +89,13 @@ FROM query_cache qc
 JOIN rates r
   ON r.currency_code = qc.currency_code
  AND r.effective_rate_date = qc.effective_rate_date
-WHERE qc.currency_code = ? AND qc.requested_date = ?`
+WHERE qc.currency_code = ? AND qc.requested_date = ? AND qc.verified = 1
+  AND NOT EXISTS (
+    SELECT 1 FROM rates newer
+    WHERE newer.currency_code = qc.currency_code
+      AND newer.effective_rate_date > qc.effective_rate_date
+      AND newer.effective_rate_date <= qc.requested_date
+  )`
 
 	var result models.RateResult
 	err := s.db.QueryRow(query, strings.ToUpper(currency), requestedDate).Scan(
@@ -137,6 +143,14 @@ LIMIT 1`
 }
 
 func (s *sqliteStore) StoreResolvedRate(currency, requestedDate string, rate models.NBPRate) error {
+	currency = strings.ToUpper(currency)
+	if err := rate.Validate(currency); err != nil {
+		return err
+	}
+	date, err := time.Parse("2006-01-02", requestedDate)
+	if err != nil || date.Format("2006-01-02") != requestedDate || requestedDate < rate.EffectiveRateDate {
+		return fmt.Errorf("niepoprawna data zapytania: %q", requestedDate)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return normalizeDBError(fmt.Errorf("nie udało się rozpocząć zapisu do bazy cache: %w", err))
@@ -149,6 +163,7 @@ func (s *sqliteStore) StoreResolvedRate(currency, requestedDate string, rate mod
 
 	timestamp := time.Now().Format(time.RFC3339)
 	currency = strings.ToUpper(currency)
+	verified := requestedDate < models.NBPToday() || rate.EffectiveRateDate == requestedDate
 
 	if _, err = tx.Exec(`
 INSERT INTO rates(currency_code, effective_rate_date, mid, table_no, updated_at)
@@ -167,15 +182,17 @@ ON CONFLICT(currency_code, effective_rate_date) DO UPDATE SET
 	}
 
 	if _, err = tx.Exec(`
-INSERT INTO query_cache(currency_code, requested_date, effective_rate_date, updated_at)
-VALUES (?, ?, ?, ?)
+INSERT INTO query_cache(currency_code, requested_date, effective_rate_date, updated_at, verified)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(currency_code, requested_date) DO UPDATE SET
   effective_rate_date = excluded.effective_rate_date,
-  updated_at = excluded.updated_at`,
+  updated_at = excluded.updated_at,
+  verified = excluded.verified`,
 		currency,
 		requestedDate,
 		rate.EffectiveRateDate,
 		timestamp,
+		verified,
 	); err != nil {
 		return normalizeDBError(fmt.Errorf("nie udało się zapisać mapowania zapytania do bazy cache: %w", err))
 	}
@@ -189,6 +206,12 @@ ON CONFLICT(currency_code, requested_date) DO UPDATE SET
 func (s *sqliteStore) StoreHistoricalRates(currency string, rates []models.NBPRate) error {
 	if len(rates) == 0 {
 		return nil
+	}
+	currency = strings.ToUpper(currency)
+	for _, rate := range rates {
+		if err := rate.Validate(currency); err != nil {
+			return err
+		}
 	}
 
 	tx, err := s.db.Begin()
@@ -435,6 +458,7 @@ CREATE TABLE IF NOT EXISTS query_cache (
   requested_date TEXT NOT NULL,
   effective_rate_date TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  verified INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(currency_code, requested_date)
 );
 CREATE TABLE IF NOT EXISTS currencies (
@@ -445,6 +469,17 @@ CREATE TABLE IF NOT EXISTS currencies (
 
 	if _, err := s.db.Exec(schema); err != nil {
 		return normalizeDBError(fmt.Errorf("nie udało się przygotować struktury bazy cache: %w", err))
+	}
+	// Legacy mappings were derived from a possibly incomplete cache. Preserve
+	// them, but only mappings resolved by the corrected code may be reused.
+	var hasVerified int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('query_cache') WHERE name = 'verified'`).Scan(&hasVerified); err != nil {
+		return err
+	}
+	if hasVerified == 0 {
+		if _, err := s.db.Exec(`ALTER TABLE query_cache ADD COLUMN verified INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
 	}
 	return nil
 }

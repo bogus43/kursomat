@@ -3,6 +3,7 @@ package nbp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"kursomat/internal/cache"
@@ -61,14 +62,24 @@ func (s *Service) GetRates(ctx context.Context, currencies []string, requestedDa
 }
 
 func (s *Service) GetRate(ctx context.Context, currency string, requestedDate time.Time) (models.RateResult, error) {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	requestedDate = calendarDate(requestedDate)
 	requestedDateStr := requestedDate.Format("2006-01-02")
+	if err := ctx.Err(); err != nil {
+		return models.RateResult{}, err
+	}
+	validCached := func(rate models.RateResult) bool {
+		err := (models.NBPRate{Currency: rate.Currency, EffectiveRateDate: rate.EffectiveRateDate, Mid: rate.Mid}).Validate(currency)
+		return err == nil && rate.EffectiveRateDate <= requestedDateStr && rate.EffectiveRateDate >= requestedDate.AddDate(0, 0, -s.client.maxLookbackDays).Format("2006-01-02")
+	}
 
 	if s.cache != nil {
 		cached, found, err := s.cache.GetByQuery(currency, requestedDateStr)
 		if err != nil {
 			return models.RateResult{}, err
 		}
-		if found {
+		// Today's fallback can become obsolete when NBP publishes a new table.
+		if found && validCached(cached) && (cached.EffectiveRateDate == requestedDateStr || requestedDateStr < models.NBPToday()) {
 			return cached, nil
 		}
 
@@ -76,15 +87,9 @@ func (s *Service) GetRate(ctx context.Context, currency string, requestedDate ti
 		if err != nil {
 			return models.RateResult{}, err
 		}
-		if found {
-			if err := s.cache.StoreResolvedRate(currency, requestedDateStr, models.NBPRate{
-				Currency:          historical.Currency,
-				EffectiveRateDate: historical.EffectiveRateDate,
-				Mid:               historical.Mid,
-				TableNo:           historical.TableNo,
-			}); err != nil {
-				return models.RateResult{}, err
-			}
+		// An exact date is conclusive; an older row does not prove that the
+		// intervening dates were non-publication days.
+		if found && validCached(historical) && historical.EffectiveRateDate == requestedDateStr {
 			return historical, nil
 		}
 	}

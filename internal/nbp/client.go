@@ -123,29 +123,51 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) GetRateOnOrBefore(ctx context.Context, currency string, requestedDate time.Time) (models.NBPRate, error) {
-	endDate := requestedDate.Format("2006-01-02")
-	startDate := requestedDate.AddDate(0, 0, -c.maxLookbackDays).Format("2006-01-02")
-	endpoint := fmt.Sprintf(
-		"%s/exchangerates/rates/A/%s/%s/%s/?format=json",
-		c.baseURL,
-		strings.ToUpper(currency),
-		startDate,
-		endDate,
-	)
-
-	var payload rateRangeResponse
-	if err := c.doJSON(ctx, endpoint, &payload); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return models.NBPRate{}, ErrNoData
-		}
-		return models.NBPRate{}, err
+	end := calendarDate(requestedDate)
+	first := end.AddDate(0, 0, -c.maxLookbackDays)
+	archiveStart := time.Date(2002, 1, 2, 0, 0, 0, 0, time.UTC)
+	if first.Before(archiveStart) {
+		first = archiveStart
 	}
-	return pickLatestRate(payload, strings.ToUpper(currency), requestedDate)
+	// Search newest first, in windows of at most 93 inclusive calendar days.
+	for !end.Before(first) {
+		start := end.AddDate(0, 0, -92)
+		if start.Before(first) {
+			start = first
+		}
+		rates, err := c.GetRatesInRange(ctx, currency, start, end)
+		if err != nil && !errors.Is(err, ErrNoData) {
+			return models.NBPRate{}, err
+		}
+		if len(rates) > 0 {
+			latest := rates[0]
+			for _, rate := range rates[1:] {
+				if rate.EffectiveRateDate > latest.EffectiveRateDate {
+					latest = rate
+				}
+			}
+			return latest, nil
+		}
+		end = start.AddDate(0, 0, -1)
+	}
+	return models.NBPRate{}, ErrNoData
+}
+
+func calendarDate(date time.Time) time.Time {
+	return time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 func (c *Client) GetRatesInRange(ctx context.Context, currency string, startDate, endDate time.Time) ([]models.NBPRate, error) {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if !models.ValidCurrencyCode(currency) {
+		return nil, fmt.Errorf("niepoprawny kod waluty: %s", currency)
+	}
+	startDate, endDate = calendarDate(startDate), calendarDate(endDate)
 	if endDate.Before(startDate) {
 		return nil, fmt.Errorf("data końcowa nie może być wcześniejsza niż początkowa")
+	}
+	if endDate.After(startDate.AddDate(0, 0, 92)) {
+		return nil, fmt.Errorf("zakres pojedynczego zapytania NBP nie może przekraczać 93 dni")
 	}
 
 	endpoint := fmt.Sprintf(
@@ -164,14 +186,29 @@ func (c *Client) GetRatesInRange(ctx context.Context, currency string, startDate
 		return nil, err
 	}
 
+	if payload.Table != "A" || payload.Code != currency {
+		return nil, fmt.Errorf("odpowiedź NBP zawiera inną tabelę lub walutę niż żądana")
+	}
+	if len(payload.Rates) == 0 {
+		return nil, ErrNoData
+	}
 	rates := make([]models.NBPRate, 0, len(payload.Rates))
+	seen := make(map[string]bool, len(payload.Rates))
 	for _, item := range payload.Rates {
-		rates = append(rates, models.NBPRate{
+		rate := models.NBPRate{
 			Currency:          strings.ToUpper(currency),
 			EffectiveRateDate: item.EffectiveDate,
 			Mid:               item.Mid,
 			TableNo:           item.No,
-		})
+		}
+		if err := rate.Validate(currency); err != nil {
+			return nil, err
+		}
+		if rate.EffectiveRateDate < startDate.Format("2006-01-02") || rate.EffectiveRateDate > endDate.Format("2006-01-02") || seen[rate.EffectiveRateDate] {
+			return nil, fmt.Errorf("data kursu NBP poza zakresem lub powtórzona: %s", rate.EffectiveRateDate)
+		}
+		seen[rate.EffectiveRateDate] = true
+		rates = append(rates, rate)
 	}
 	return rates, nil
 }
@@ -186,9 +223,20 @@ func (c *Client) GetCurrencies(ctx context.Context) ([]models.Currency, error) {
 	if len(payload) == 0 {
 		return nil, ErrNoData
 	}
+	if len(payload) != 1 || payload[0].Table != "A" {
+		return nil, fmt.Errorf("niepoprawna tabela walut NBP")
+	}
+	if len(payload[0].Rates) == 0 {
+		return nil, ErrNoData
+	}
 
 	currencies := make([]models.Currency, 0, len(payload[0].Rates))
+	seen := make(map[string]bool, len(payload[0].Rates))
 	for _, item := range payload[0].Rates {
+		if !models.ValidCurrencyCode(item.Code) || strings.TrimSpace(item.Currency) == "" || seen[item.Code] {
+			return nil, fmt.Errorf("niepoprawna lub powtórzona waluta w tabeli NBP")
+		}
+		seen[item.Code] = true
 		currencies = append(currencies, models.Currency{
 			Code: item.Code,
 			Name: item.Currency,
@@ -202,20 +250,24 @@ func pickLatestRate(payload rateRangeResponse, currency string, requestedDate ti
 		return models.NBPRate{}, ErrNoData
 	}
 
+	var latest models.NBPRate
 	for i := len(payload.Rates) - 1; i >= 0; i-- {
 		current := payload.Rates[i]
 		rateDate, err := time.Parse("2006-01-02", current.EffectiveDate)
 		if err != nil {
 			return models.NBPRate{}, fmt.Errorf("nie udało się sparsować daty kursu z API: %w", err)
 		}
-		if !rateDate.After(requestedDate) {
-			return models.NBPRate{
+		if !rateDate.After(requestedDate) && current.EffectiveDate > latest.EffectiveRateDate {
+			latest = models.NBPRate{
 				Currency:          currency,
 				EffectiveRateDate: current.EffectiveDate,
 				Mid:               current.Mid,
 				TableNo:           current.No,
-			}, nil
+			}
 		}
+	}
+	if latest.EffectiveRateDate != "" {
+		return latest, latest.Validate(currency)
 	}
 	return models.NBPRate{}, ErrNoData
 }

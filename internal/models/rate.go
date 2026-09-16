@@ -1,5 +1,31 @@
 package models
 
+import (
+	"fmt"
+	"math"
+	"regexp"
+	"time"
+)
+
+var currencyCodePattern = regexp.MustCompile(`^[A-Z]{3}$`)
+
+func ValidCurrencyCode(code string) bool { return currencyCodePattern.MatchString(code) }
+
+// Validate rejects invalid values before they can enter the cache or a calculation.
+func (r NBPRate) Validate(currency string) error {
+	if !ValidCurrencyCode(currency) || r.Currency != currency {
+		return fmt.Errorf("niezgodna waluta kursu: %q (oczekiwano %s)", r.Currency, currency)
+	}
+	date, err := time.Parse("2006-01-02", r.EffectiveRateDate)
+	if err != nil || date.Format("2006-01-02") != r.EffectiveRateDate {
+		return fmt.Errorf("niepoprawna data kursu: %q", r.EffectiveRateDate)
+	}
+	if math.IsNaN(r.Mid) || math.IsInf(r.Mid, 0) || r.Mid <= 0 {
+		return fmt.Errorf("niepoprawny kurs dla waluty %s", currency)
+	}
+	return nil
+}
+
 type OutputFormat string
 
 const (
