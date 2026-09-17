@@ -1,0 +1,23 @@
+2026-09-17 Go coverage run: 10 function-focused iterations, no production code changes.
+Baseline: go test -coverprofile=/tmp/kursomat-before.cover ./...; total 53.0%.
+Iteration | Function | Total coverage | Commit
+1 | models.NBPRate.Validate | 54.0% | eae678b
+2 | models.AppConfig.Normalize | 55.2% | 74bd86a
+3 | cache.ListCurrencyStats | 56.5% | 05f53b9
+4 | cache.ListCurrencyHistory | 58.2% | e8295dc
+5 | appcore.HumanizeError | 59.1% | c564581
+6 | nbp.mapNetworkError | 59.9% | a8c1017
+7 | nbp.shouldRetryNetworkError | 60.5% | 88f4a5f
+8 | desktop.CancelImport | 61.1% | 12fd3a8
+9 | appcore.ClearCache | 61.9% | 2f3e562
+10 | nbp.PrefetchRates | 64.2% | 8b4266f
+All iterations passed go test ./... and were pushed to origin/main.
+Iteration 10 initially failed because fixture URLs expected lowercase codes;
+corrected fixture expectations to uppercase and reran successfully before commit.
+Final package coverage: desktop 9.5%, appcore 73.9%, cache 77.5%, models 71.9%, nbp 68.3%.
+Total gain: 11.2 percentage points. Default iteration limit reached; 80% target not reached.
+Tests use temporary SQLite databases and local HTTP transports, not live NBP.
+Initial push approval rejection resolved after verifying the existing GitHub remote.
+Final checks passed: go test -race -count=1 ./..., go vet ./...,
+npm --prefix frontend test (19/19), npm --prefix frontend run build.
+Local Graphify code graph refreshed: 556 nodes, 980 edges, 23 communities.
